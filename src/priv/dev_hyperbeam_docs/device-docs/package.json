@@ -1,0 +1,9 @@
+{
+  "name": "hyperbeam-device-docs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "docs:build": "node scripts/build-docs-site.mjs"
+  }
+}

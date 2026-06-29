@@ -1,0 +1,9 @@
+{application, hyperbeam_docs,
+    [
+        {description, "HyperBEAM docs device"},
+        {vsn, "0.1.0"},
+        {registered, []},
+        {applications, [kernel, stdlib, hb]},
+        {env, []},
+        {modules, []}
+    ]}.
