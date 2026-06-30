@@ -1216,7 +1216,7 @@ device_key_summary(Device, Name, Kind, Description) ->
     }.
 
 docs_schema_for_device(Device, SpecID, Opts) ->
-    case implementation_derived_schema(Device, Opts) of
+    case implementation_derived_schema(Device, SpecID, Opts) of
         {ok, Schema, SchemaOrder, Source} ->
             {
                 Schema,
@@ -1242,10 +1242,22 @@ docs_schema_for_device(Device, SpecID, Opts) ->
             }
     end.
 
-implementation_derived_schema(Device, Opts) ->
-    case hb_types_available() of
-        true -> implementation_derived_schema_from_types(Device, Opts);
-        false -> implementation_derived_schema_from_info(Device, Opts)
+implementation_derived_schema(Device, SpecID, Opts) ->
+    case implementation_derived_schema_from_types(Device, Opts) of
+        {ok, _Schema, _Order, _Source} = Ok ->
+            Ok;
+        {error, TypesReason} ->
+            case implementation_derived_schema_from_archive(Device, SpecID, Opts) of
+                {ok, _Schema, _Order, _Source} = Ok ->
+                    Ok;
+                {error, ArchiveReason} ->
+                    case implementation_derived_schema_from_info(Device, Opts) of
+                        {ok, _Schema, _Order, _Source} = Ok ->
+                            Ok;
+                        {error, InfoReason} ->
+                            {error, {TypesReason, ArchiveReason, InfoReason}}
+                    end
+            end
     end.
 
 hb_types_available() ->
@@ -1255,12 +1267,30 @@ hb_types_available() ->
     end.
 
 implementation_derived_schema_from_types(Device, Opts) ->
-    case hb_types:extract(Device, Opts#{ <<"hashpath">> => ignore }) of
-        {ok, #{ <<"keys">> := Keys } = Extracted} when is_map(Keys), map_size(Keys) > 0 ->
+    case hb_types_available() of
+        false ->
+            {error, hb_types_unavailable};
+        true ->
+            case hb_types:extract(Device, Opts#{ <<"hashpath">> => ignore }) of
+                {ok, Extracted} ->
+                    implementation_schema_from_extract(
+                        Device,
+                        Extracted,
+                        <<"hb_types:extract/2">>,
+                        #{}
+                    );
+                {error, Reason} ->
+                    {error, Reason}
+            end
+    end.
+
+implementation_schema_from_extract(Device, Extracted, Extractor, SourceExtra) ->
+    case dev_hyperbeam_docs_schema:normalize_extract(Extracted) of
+        {ok, Keys, Meta} when map_size(Keys) > 0 ->
             Schema =
                 maps:from_list(
                     [
-                        {Key, implementation_schema_key(Device, Key, KeySchema)}
+                        {Key, implementation_schema_key(Device, Key, KeySchema, Extractor)}
                     || {Key, KeySchema} <- maps:to_list(Keys)
                     ]
                 ),
@@ -1268,20 +1298,340 @@ implementation_derived_schema_from_types(Device, Opts) ->
             {ok,
                 Schema,
                 Order,
-                #{
-                    <<"status">> => <<"present">>,
-                    <<"extractor">> => <<"hb_types:extract/2">>,
-                    <<"module">> => maps:get(<<"module">>, Extracted, hb_util:bin(Device)),
-                    <<"key-count">> => map_size(Schema)
-                }
+                maps:merge(
+                    #{
+                        <<"status">> => <<"present">>,
+                        <<"extractor">> => Extractor,
+                        <<"module">> => maps:get(<<"module">>, Meta, hb_util:bin(Device)),
+                        <<"key-count">> => map_size(Schema)
+                    },
+                    SourceExtra
+                )
             };
-        {ok, #{ <<"keys">> := Keys }} when is_map(Keys) ->
+        {ok, Keys, _Meta} when is_map(Keys) ->
             {error, no_public_type_keys};
-        {ok, Other} ->
-            {error, {unexpected_schema_shape, Other}};
         {error, Reason} ->
             {error, Reason}
     end.
+
+implementation_derived_schema_from_archive(Device, SpecID, Opts) ->
+    archive_schema_from_sources(
+        Device,
+        [
+            {<<"trusted-devices">>,
+                fun() -> trusted_implementation_ids(Device, SpecID, Opts) end},
+            {<<"preloaded-store">>,
+                fun() -> preloaded_implementation_ids(Device, SpecID, Opts) end},
+            {<<"cache">>,
+                fun() -> cached_implementation_ids(SpecID, Opts) end},
+            {<<"gateway">>,
+                fun() -> gateway_implementation_ids(SpecID, Opts) end}
+        ],
+        Opts,
+        []
+    ).
+
+archive_schema_from_sources(_Device, [], _Opts, Reasons) ->
+    {error, {archive_schema_unavailable, lists:reverse(Reasons)}};
+archive_schema_from_sources(Device, [{Source, IDsFun} | Rest], Opts, Reasons) ->
+    case IDsFun() of
+        {ok, IDs0} ->
+            IDs = lists:usort([ID || ID <- IDs0, is_binary(ID), ?IS_ID(ID)]),
+            case archive_schema_from_ids(Device, Source, IDs, Opts, []) of
+                {ok, _Schema, _Order, _Source} = Ok ->
+                    Ok;
+                {error, Reason} ->
+                    archive_schema_from_sources(Device, Rest, Opts, [{Source, Reason} | Reasons])
+            end;
+        {error, Reason} ->
+            archive_schema_from_sources(Device, Rest, Opts, [{Source, Reason} | Reasons])
+    end.
+
+archive_schema_from_ids(_Device, Source, [], _Opts, Reasons) ->
+    {error, {no_archive_schema_for_source, Source, lists:reverse(Reasons)}};
+archive_schema_from_ids(Device, Source, [ID | Rest], Opts, Reasons) ->
+    case implementation_archive_body(ID, Opts) of
+        {ok, Archive, BodySource} ->
+            case dev_hyperbeam_docs_schema:extract_archive(Archive) of
+                {ok, Extracted} ->
+                    case
+                        implementation_schema_from_extract(
+                            Device,
+                            Extracted,
+                            <<"beam-archive-abstract-code">>,
+                            #{
+                                <<"archive-source">> => Source,
+                                <<"archive-body-source">> => BodySource,
+                                <<"implementation-id">> => ID
+                            }
+                        )
+                    of
+                        {ok, _Schema, _Order, _Source} = Ok ->
+                            Ok;
+                        {error, Reason} ->
+                            archive_schema_from_ids(
+                                Device,
+                                Source,
+                                Rest,
+                                Opts,
+                                [{ID, Reason} | Reasons]
+                            )
+                    end;
+                {error, Reason} ->
+                    archive_schema_from_ids(
+                        Device,
+                        Source,
+                        Rest,
+                        Opts,
+                        [{ID, Reason} | Reasons]
+                    )
+            end;
+        {error, Reason} ->
+            archive_schema_from_ids(Device, Source, Rest, Opts, [{ID, Reason} | Reasons])
+    end.
+
+trusted_implementation_ids(Device, SpecID, Opts) ->
+    Trusted = hb_opts:get(trusted_devices, #{}, Opts),
+    {ok,
+        [
+            ID
+        || Key <- [SpecID, Device],
+            ID <- [maps:get(Key, Trusted, undefined)],
+            is_binary(ID)
+        ]}.
+
+preloaded_implementation_ids(Device, SpecID, Opts) ->
+    NodeOpts = maps:without([<<"cache-control">>, <<"only">>, <<"prefer">>], Opts),
+    case hb_opts:get(preloaded_store, undefined, NodeOpts) of
+        undefined ->
+            {error, preloaded_store_missing};
+        Store ->
+            PreOpts = NodeOpts#{
+                <<"store">> => [Store],
+                <<"cache-read-mode">> => raw
+            },
+            Specs = lists:usort([SpecID | preloaded_specs(Device, Store, PreOpts)]),
+            {ok,
+                lists:append(
+                    [
+                        case cached_implementation_ids(Spec, PreOpts) of
+                            {ok, IDs} -> IDs;
+                            {error, _Reason} -> []
+                        end
+                    || Spec <- Specs,
+                        is_binary(Spec),
+                        ?IS_ID(Spec)
+                    ]
+                )}
+    end.
+
+preloaded_specs(Device, Store, Opts) ->
+    case hb_store:read(Store, <<?PRELOADED_INDEX_KEY/binary, "/", Device/binary>>, Opts) of
+        {ok, SpecID} when is_binary(SpecID), ?IS_ID(SpecID) -> [SpecID];
+        _ -> []
+    end.
+
+cached_implementation_ids(SpecID, Opts) ->
+    case hb_cache:match(implementation_query(SpecID), Opts) of
+        {ok, IDs} when is_list(IDs) -> {ok, IDs};
+        IDs when is_list(IDs) -> {ok, IDs};
+        {error, Reason} -> {error, Reason};
+        Other -> {error, {implementation_match_unexpected, Other}}
+    end.
+
+gateway_implementation_ids(SpecID, Opts) ->
+    case hb_opts:get(<<"trusted-device-signers">>, [], Opts) of
+        [] ->
+            {error, no_trusted_device_signers};
+        TrustedSigners ->
+            case hb_client_gateway:device(SpecID, TrustedSigners, Opts) of
+                {ok, IDs} when is_list(IDs) -> {ok, IDs};
+                {error, Reason} -> {error, Reason};
+                Other -> {error, {gateway_device_unexpected, Other}}
+            end
+    end.
+
+implementation_query(SpecID) ->
+    #{
+        <<"data-protocol">> => <<"ao">>,
+        <<"variant">> => <<"ao.N.1">>,
+        <<"content-type">> => <<"application/beam-archive">>,
+        <<"implements-device">> => SpecID
+    }.
+
+implementation_archive_body(ID, Opts) ->
+    case cached_archive_body(ID, Opts) of
+        {ok, Archive} ->
+            {ok, Archive, <<"cache">>};
+        {error, CacheReason} ->
+            case preloaded_archive_body(ID, Opts) of
+                {ok, Archive} ->
+                    {ok, Archive, <<"preloaded-store">>};
+                {error, PreloadedReason} ->
+                    case gateway_archive_body(ID, Opts) of
+                        {ok, Archive} ->
+                            {ok, Archive, <<"gateway-data">>};
+                        {error, GatewayReason} ->
+                            {error,
+                                {archive_body_unavailable,
+                                    CacheReason,
+                                    PreloadedReason,
+                                    GatewayReason
+                                }}
+                    end
+            end
+    end.
+
+cached_archive_body(ID, Opts) ->
+    case hb_cache:read(ID, Opts) of
+        {ok, Msg} -> archive_body_from_message(Msg, Opts);
+        {error, Reason} -> {error, {cache_read_failed, Reason}};
+        Other -> {error, {cache_read_unexpected, Other}}
+    end.
+
+preloaded_archive_body(ID, Opts) ->
+    NodeOpts = maps:without([<<"cache-control">>, <<"only">>, <<"prefer">>], Opts),
+    case hb_opts:get(preloaded_store, undefined, NodeOpts) of
+        undefined ->
+            {error, preloaded_store_missing};
+        Store ->
+            PreOpts = NodeOpts#{
+                <<"store">> => [Store],
+                <<"cache-read-mode">> => raw
+            },
+            case hb_cache:read(ID, PreOpts) of
+                {ok, Msg} -> archive_body_from_message(Msg, PreOpts);
+                {error, Reason} -> {error, {preloaded_cache_read_failed, Reason}};
+                Other -> {error, {preloaded_cache_read_unexpected, Other}}
+            end
+    end.
+
+gateway_archive_body(ID, Opts) ->
+    case direct_gateway_archive_body(ID, Opts) of
+        {ok, _Archive} = Ok ->
+            Ok;
+        {error, DirectReason} ->
+            case gateway_raw_archive_body(ID, Opts) of
+                {ok, _Archive} = Ok ->
+                    Ok;
+                {error, RawReason} ->
+                    case hb_client_gateway:data(ID, Opts) of
+                        {ok, Body} when is_binary(Body) ->
+                            case archive_body_payload(Body, Opts) of
+                                {ok, Archive} ->
+                                    {ok, Archive};
+                                {error, DataReason} ->
+                                    {error, {gateway_archive_body_unavailable,
+                                        DirectReason,
+                                        RawReason,
+                                        DataReason
+                                    }}
+                            end;
+                        {ok, Other} ->
+                            {error, {gateway_body_not_binary, DirectReason, RawReason, Other}};
+                        {error, Reason} ->
+                            {error, {gateway_data_failed, DirectReason, RawReason, Reason}}
+                    end
+            end
+    end.
+
+direct_gateway_archive_body(ID, Opts) ->
+    _ = application:ensure_all_started(hackney),
+    URL = gateway_data_url(ID, Opts),
+    case hackney:request(get, URL, [], <<>>, [{follow_redirect, true}, {recv_timeout, 30000}]) of
+        {ok, Status, _Headers, Ref} when Status >= 200, Status < 300 ->
+            case hackney:body(Ref) of
+                {ok, Body} when is_binary(Body) -> archive_body_payload(Body, Opts);
+                {ok, Other} -> {error, {direct_gateway_body_not_binary, Other}};
+                {error, Reason} -> {error, {direct_gateway_body_failed, Reason}}
+            end;
+        {ok, Status, _Headers, Ref} ->
+            _ = hackney:skip_body(Ref),
+            {error, {direct_gateway_status, Status}};
+        {error, Reason} ->
+            {error, {direct_gateway_failed, Reason}}
+    end.
+
+gateway_data_url(ID, Opts) ->
+    Gateway0 = hb_opts:get(<<"gateway">>, <<"https://arweave.net">>, Opts),
+    Gateway = trim_trailing_slash(hb_util:bin(Gateway0)),
+    <<Gateway/binary, "/", ID/binary>>.
+
+trim_trailing_slash(Bin) when is_binary(Bin), byte_size(Bin) > 0 ->
+    Last = binary:last(Bin),
+    case Last of
+        $/ -> binary:part(Bin, 0, byte_size(Bin) - 1);
+        _ -> Bin
+    end;
+trim_trailing_slash(Bin) ->
+    Bin.
+
+gateway_raw_archive_body(ID, Opts) ->
+    Req = #{
+        <<"multirequest-accept-status">> => 200,
+        <<"multirequest-responses">> => 1,
+        <<"path">> => <<"/arweave/raw/", ID/binary>>,
+        <<"method">> => <<"GET">>
+    },
+    case hb_http:request(Req, Opts) of
+        {ok, Data} when is_binary(Data) ->
+            archive_body_payload(Data, Opts);
+        {ok, Res} ->
+            case gateway_item_response_body(ID, Res, Opts) of
+                {ok, Data} -> archive_body_payload(Data, Opts);
+                {error, Reason} -> {error, Reason}
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+archive_body_from_message(Msg, Opts) when is_map(Msg) ->
+    case hb_maps:get(<<"body">>, Msg, undefined, Opts) of
+        Archive when is_binary(Archive) ->
+            archive_body_payload(Archive, Opts);
+        undefined ->
+            {error, archive_body_missing};
+        Body ->
+            try hb_cache:ensure_loaded(Body, Opts) of
+                Archive when is_binary(Archive) -> archive_body_payload(Archive, Opts);
+                Other -> {error, {archive_body_not_binary, Other}}
+            catch
+                Class:Reason -> {error, {archive_body_load_failed, Class, Reason}}
+            end
+    end;
+archive_body_from_message(_Msg, _Opts) ->
+    {error, archive_message_not_map}.
+
+archive_body_payload(Archive, Opts) when is_binary(Archive) ->
+    case hb_device_archive:contents(Archive) of
+        {ok, _Modules, _Resources} ->
+            {ok, Archive};
+        {error, DirectReason} ->
+            case ans104_archive_body(Archive, Opts) of
+                {ok, _Body} = Ok -> Ok;
+                {error, Ans104Reason} ->
+                    {error, {not_beam_archive_body, DirectReason, Ans104Reason}}
+            end
+    end;
+archive_body_payload(Other, _Opts) ->
+    {error, {archive_payload_not_binary, Other}}.
+
+ans104_archive_body(Raw, Opts) ->
+    try ar_bundles:deserialize(Raw) of
+        Raw ->
+            {error, ans104_deserialize_identity};
+        Item ->
+            archive_body_from_item(Item, Opts)
+    catch
+        Class:Reason -> {error, {ans104_archive_decode_failed, Class, Reason}}
+    end.
+
+archive_body_from_item(#tx{data = Data}, Opts) ->
+    archive_body_payload(Data, Opts);
+archive_body_from_item(Item, Opts) when is_map(Item) ->
+    archive_body_from_message(Item, Opts);
+archive_body_from_item(Other, _Opts) ->
+    {error, {unsupported_archive_item_shape, Other}}.
 
 implementation_derived_schema_from_info(Device, Opts) ->
     case loaded_device_module(Device, Opts) of
@@ -1384,7 +1734,7 @@ fallback_schema_key(Device, Key) ->
         <<"type-schema">> => #{ <<"kind">> => <<"any">> }
     }.
 
-implementation_schema_key(Device, Key, KeySchema) ->
+implementation_schema_key(Device, Key, KeySchema, Extractor) ->
     DeviceID =
         case is_binary(Device) of
             true -> Device;
@@ -1398,7 +1748,7 @@ implementation_schema_key(Device, Key, KeySchema) ->
             schema_key(DeviceID, Key, <<>>, Params)
         ),
         #{
-            <<"source">> => <<"hb_types:extract/2">>,
+            <<"source">> => Extractor,
             <<"description-source">> => <<"none">>,
             <<"derived">> => true,
             <<"returns">> => Return,
