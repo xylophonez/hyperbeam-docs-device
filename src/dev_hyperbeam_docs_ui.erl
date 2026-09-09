@@ -430,8 +430,14 @@ render_schema_key_html(Payload) ->
             <<"<p class=\"eyebrow\">Schema Key</p><h1>~">>, esc(DeviceID),
             <<" / ">>, esc(Key), <<"</h1><p>">>,
             esc(maps:get(<<"description">>, KeySchema, <<>>)),
-            <<"</p><h2>Parameters</h2>">>,
-            params_table(DeviceID, Key, Params)
+            <<"</p>">>,
+            schema_arguments(KeySchema),
+            <<"<h2>Request parameters</h2>">>,
+            params_table(DeviceID, Key, Params),
+            <<"<h2>Returns</h2><p><code>">>,
+            esc(maps:get(<<"returns">>, KeySchema, <<"not declared">>)),
+            <<"</code></p>">>,
+            schema_details(KeySchema)
         ],
     docs_page_html(
         <<"HyperBEAM Schema Key">>,
@@ -439,6 +445,38 @@ render_schema_key_html(Payload) ->
         device_sidebar(Data, device_schema_key_path(DeviceID, Key)),
         Content
     ).
+
+%% @doc Show the actual function argument roles and their declared types.
+schema_arguments(KeySchema) ->
+    case maps:get(<<"arguments">>, KeySchema, []) of
+        [] ->
+            <<"<p>No extractable type specification is available for this key.</p>">>;
+        Arguments ->
+            [
+                <<"<h2>Arguments</h2><table><thead><tr><th>Argument</th>"
+                    "<th>Type</th></tr></thead><tbody>">>,
+                [
+                    [<<"<tr><td>">>, esc(maps:get(<<"name">>, Argument)),
+                        <<"</td><td><code>">>,
+                        esc(maps:get(<<"type">>, Argument)),
+                        <<"</code></td></tr>">>]
+                || Argument <- Arguments
+                ],
+                <<"</tbody></table>">>
+            ]
+    end.
+
+%% @doc Preserve nested fields and wildcard rules in an inspectable JSON schema.
+schema_details(KeySchema) ->
+    case maps:find(<<"type-schema">>, KeySchema) of
+        {ok, Schema} ->
+            [
+                <<"<details><summary>Full extracted schema</summary>">>,
+                render_code_block(<<"json">>, [hb_json:encode(Schema)]),
+                <<"</details>">>
+            ];
+        error -> []
+    end.
 
 render_schema_parameter_html(Payload) ->
     Data = maps:get(<<"device-data">>, Payload),
@@ -1922,7 +1960,7 @@ schema_table(DeviceID, Schema, Order) ->
             true -> <<"<th>Description</th>">>;
             false -> []
         end,
-        <<"<th>Parameters</th></tr></thead><tbody>">>,
+        <<"<th>Parameters</th><th>Returns</th></tr></thead><tbody>">>,
         schema_rows(DeviceID, Schema, Order, IncludeDescriptions),
         <<"</tbody></table>">>
     ].
@@ -1950,7 +1988,9 @@ schema_rows(DeviceID, Schema, Order, IncludeDescriptions) ->
                     schema_description_cell(KeySchema, IncludeDescriptions),
                     <<"<td>">>,
                     param_pills(DeviceID, Name, maps:get(<<"parameters">>, KeySchema, #{})),
-                    <<"</td></tr>">>
+                    <<"</td><td><code>">>,
+                    esc(maps:get(<<"returns">>, KeySchema, <<"not declared">>)),
+                    <<"</code></td></tr>">>
                 ]
         end
     || Name <- Order
@@ -2117,8 +2157,10 @@ schema_source_label(Source) ->
         <<"implementation-derived">> ->
             iolist_to_binary([
                 <<"implementation-derived via ">>,
-                maps:get(<<"extractor">>, Source, <<"hb_types:extract/2">>),
+                maps:get(<<"extractor">>, Source, <<"unknown">>),
                 <<" (">>,
+                hb_util:bin(maps:get(<<"typed-key-count">>, Source, 0)),
+                <<" typed / ">>,
                 hb_util:bin(maps:get(<<"key-count">>, Source, 0)),
                 <<" keys)">>
             ]);

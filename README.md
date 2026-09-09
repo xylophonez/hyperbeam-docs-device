@@ -33,6 +33,19 @@ This device serves:
 - `/~device@version/docs/recipes` recipe pages discovered from on-weave metadata
 - JSON or HTML responses based on the incoming `Accept` header
 
+Schemas come from the implementation selected by HyperBEAM's device loader.
+`hb_device_load:schema/2` reads the type information retained when loading an
+archive; packaged modules do not need to expose their object code through the
+Erlang code server. Public keys use the same function selection as AO-Core,
+including the extra key argument of handlers.
+
+Schema pages show argument roles, request parameter types and required flags,
+return types, and the full nested schema. JSON includes `arguments`, `parameters`,
+`returns`, and `type-schema`. The full docs payload reports `typed-key-count`
+alongside `key-count` in `schema-source`. Exports without an extractable spec
+remain visible with `schema-status: unavailable`; their types are not inferred.
+The pinned runtime skips overloaded specs and needs BEAM debug information.
+
 This device does not:
 
 - replace HyperBEAM's device loader
@@ -53,6 +66,9 @@ src/dev_hyperbeam_docs_data.erl
 
 src/dev_hyperbeam_docs_render.erl
   HTML/JSON response construction.
+
+src/dev_hyperbeam_docs_schema.erl
+  Loaded implementation schemas adapted to public device keys.
 
 src/dev_hyperbeam_docs_ui.erl
   HTML, CSS, and Markdown rendering helpers.
@@ -273,14 +289,23 @@ Do not commit wallet files. `.gitignore` excludes `hyperbeam-key.json`,
 
 ## Development Notes
 
-This repo pins HyperBEAM at:
+This repo pins HyperBEAM and its Forge plugin to the `feat/vary-x` head verified on
+2026-09-09:
 
 ```text
-a9812e021c05092fbd7332612b33b5ed9392a770
+274ea35f3302d863043c28637936c932ed5f0bdd
 ```
 
 Update the `hb` dependency and Forge plugin ref together in `rebar.config` when
 moving to a new HyperBEAM commit.
+
+For an existing checkout, refresh both the cached Forge plugin and the resolved
+dependency after changing the pin:
+
+```sh
+rebar3 plugins upgrade plugin
+rebar3 upgrade hb
+```
 
 For local HyperBEAM development, use a rebar checkout override instead of
 committing machine-local `file://` paths:

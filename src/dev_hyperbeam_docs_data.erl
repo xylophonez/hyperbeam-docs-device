@@ -1242,135 +1242,30 @@ docs_schema_for_device(Device, SpecID, Opts) ->
             }
     end.
 
+%% @doc Render the schema retained by the loaded implementation's runtime.
 implementation_derived_schema(Device, Opts) ->
-    case hb_types_available() of
-        true -> implementation_derived_schema_from_types(Device, Opts);
-        false -> implementation_derived_schema_from_info(Device, Opts)
+    case dev_hyperbeam_docs_schema:extract(Device, Opts) of
+        {ok, #{ <<"keys">> := Keys } = Extracted} when map_size(Keys) > 0 ->
+            Schema = maps:map(
+                fun(Key, KeySchema) ->
+                    implementation_schema_key(Device, Key, KeySchema)
+                end,
+                Keys
+            ),
+            Count = maps:get(<<"typed-key-count">>, Extracted),
+            Status =
+                if Count =:= map_size(Keys) -> <<"present">>;
+                   Count =:= 0 -> <<"unavailable">>;
+                   true -> <<"partial">>
+                end,
+            {ok, Schema, lists:sort(maps:keys(Schema)),
+                (maps:without([<<"keys">>], Extracted))#{
+                    <<"status">> => Status,
+                    <<"extractor">> => <<"hb_device_load:schema/2">>
+                }};
+        {ok, _Extracted} -> {error, no_public_keys};
+        {error, Reason} -> {error, Reason}
     end.
-
-hb_types_available() ->
-    case code:ensure_loaded(hb_types) of
-        {module, hb_types} -> erlang:function_exported(hb_types, extract, 2);
-        _ -> false
-    end.
-
-implementation_derived_schema_from_types(Device, Opts) ->
-    case hb_types:extract(Device, Opts#{ <<"hashpath">> => ignore }) of
-        {ok, #{ <<"keys">> := Keys } = Extracted} when is_map(Keys), map_size(Keys) > 0 ->
-            Schema =
-                maps:from_list(
-                    [
-                        {Key, implementation_schema_key(Device, Key, KeySchema)}
-                    || {Key, KeySchema} <- maps:to_list(Keys)
-                    ]
-                ),
-            Order = lists:sort(maps:keys(Schema)),
-            {ok,
-                Schema,
-                Order,
-                #{
-                    <<"status">> => <<"present">>,
-                    <<"extractor">> => <<"hb_types:extract/2">>,
-                    <<"module">> => maps:get(<<"module">>, Extracted, hb_util:bin(Device)),
-                    <<"key-count">> => map_size(Schema)
-                }
-            };
-        {ok, #{ <<"keys">> := Keys }} when is_map(Keys) ->
-            {error, no_public_type_keys};
-        {ok, Other} ->
-            {error, {unexpected_schema_shape, Other}};
-        {error, Reason} ->
-            {error, Reason}
-    end.
-
-implementation_derived_schema_from_info(Device, Opts) ->
-    case loaded_device_module(Device, Opts) of
-        {ok, Mod} ->
-            case fallback_schema_keys(Mod, Opts) of
-                [] ->
-                    {error, {no_public_exports, Mod}};
-                Keys ->
-                    Schema =
-                        maps:from_list(
-                            [
-                                {Key, fallback_schema_key(Device, Key)}
-                            || Key <- Keys
-                            ]
-                        ),
-                    {ok,
-                        Schema,
-                        Keys,
-                        #{
-                            <<"status">> => <<"present">>,
-                            <<"extractor">> => <<"module-info-exports">>,
-                            <<"module">> => hb_util:bin(Mod),
-                            <<"key-count">> => map_size(Schema)
-                        }
-                    }
-            end;
-        {error, Reason} ->
-            {error, Reason}
-    end.
-
-loaded_device_module(Device, Opts) ->
-    try hb_device_load:reference(Device, Opts) of
-        {ok, Mod} when is_atom(Mod) -> {ok, Mod};
-        {ok, Other} -> {error, {unexpected_device_reference, Other}};
-        {error, Reason} -> {error, Reason};
-        Other -> {error, {unexpected_device_reference, Other}}
-    catch
-        Class:Reason -> {error, {Class, Reason}}
-    end.
-
-fallback_schema_keys(Mod, Opts) ->
-    Info = fallback_device_info(Mod, Opts),
-    Keys =
-        case info_exports(Info) of
-            [] -> module_export_keys(Mod);
-            Exports -> Exports
-        end,
-    lists:sort(lists:usort(Keys)).
-
-fallback_device_info(Mod, Opts) ->
-    try
-        case erlang:function_exported(Mod, info, 1) of
-            true ->
-                Mod:info(Opts);
-            false ->
-                case erlang:function_exported(Mod, info, 0) of
-                    true -> Mod:info();
-                    false -> #{}
-                end
-        end
-    catch
-        _:_ -> #{}
-    end.
-
-info_exports(Info) when is_map(Info) ->
-    case maps:get(exports, Info, maps:get(<<"exports">>, Info, [])) of
-        Exports when is_list(Exports) ->
-            [Key || Export <- Exports, (Key = export_key(Export)) =/= <<>>];
-        _ ->
-            []
-    end;
-info_exports(_Info) ->
-    [].
-
-module_export_keys(Mod) ->
-    [
-        atom_to_binary(Name)
-    || {Name, Arity} <- Mod:module_info(exports),
-        exported_device_fun(Name, Arity)
-    ].
-
-exported_device_fun(module_info, _Arity) -> false;
-exported_device_fun(info, _Arity) -> false;
-exported_device_fun(Name, Arity) ->
-    is_atom(Name) andalso Arity >= 1 andalso Arity =< 4.
-
-export_key(Key) when is_binary(Key) -> Key;
-export_key(Key) when is_atom(Key) -> atom_to_binary(Key);
-export_key(_Key) -> <<>>.
 
 fallback_schema_key(Device, Key) ->
     (maps:without(
@@ -1379,11 +1274,17 @@ fallback_schema_key(Device, Key) ->
     ))#{
         <<"source">> => <<"module-info-exports">>,
         <<"description-source">> => <<"none">>,
-        <<"derived">> => true,
-        <<"returns">> => <<"any">>,
-        <<"type-schema">> => #{ <<"kind">> => <<"any">> }
+        <<"derived">> => false,
+        <<"schema-status">> => <<"unavailable">>,
+        <<"returns">> => <<"not declared">>,
+        <<"arguments">> => []
     }.
 
+%% @doc Keep untyped exports visible without presenting them as extracted specs.
+implementation_schema_key(Device, Key, #{ <<"status">> := <<"unavailable">> } = Schema) ->
+    (fallback_schema_key(Device, Key))#{
+        <<"schema-reason">> => maps:get(<<"reason">>, Schema)
+    };
 implementation_schema_key(Device, Key, KeySchema) ->
     DeviceID =
         case is_binary(Device) of
@@ -1398,9 +1299,18 @@ implementation_schema_key(Device, Key, KeySchema) ->
             schema_key(DeviceID, Key, <<>>, Params)
         ),
         #{
-            <<"source">> => <<"hb_types:extract/2">>,
+            <<"source">> => <<"hb_device_load:schema/2">>,
             <<"description-source">> => <<"none">>,
             <<"derived">> => true,
+            <<"schema-status">> => <<"present">>,
+            <<"arguments">> => [
+                Argument#{
+                    <<"type">> => implementation_type_label(
+                        maps:get(<<"type-schema">>, Argument)
+                    )
+                }
+            || Argument <- maps:get(<<"arguments">>, KeySchema)
+            ],
             <<"returns">> => Return,
             <<"type-schema">> => json_safe(KeySchema)
         }
@@ -1431,7 +1341,8 @@ implementation_param(Name, Presence, Type) ->
             <<>>
         )
     ))#{
-        <<"description-source">> => <<"none">>
+        <<"description-source">> => <<"none">>,
+        <<"type-schema">> => json_safe(Type)
     }.
 
 implementation_required(required) -> true;
@@ -1450,7 +1361,11 @@ implementation_type_label(#{ <<"kind">> := <<"tuple">>, <<"items">> := Items }) 
 implementation_type_label(#{ <<"kind">> := <<"union">>, <<"members">> := Members }) ->
     implementation_join_type(<<"union(">>, Members, <<")">>);
 implementation_type_label(#{ <<"kind">> := <<"literal">>, <<"value">> := Value }) ->
-    iolist_to_binary([<<"literal:">>, hb_util:bin(io_lib:format("~tp", [Value]))]);
+    hb_util:bin(io_lib:format("~tp", [Value]));
+implementation_type_label(#{ <<"kind">> := <<"range">>, <<"min">> := Min, <<"max">> := Max }) ->
+    iolist_to_binary([hb_util:bin(Min), <<"..">>, hb_util:bin(Max)]);
+implementation_type_label(#{ <<"kind">> := <<"wildcard">> }) ->
+    <<"_ (kept as given)">>;
 implementation_type_label(#{ <<"kind">> := Kind }) ->
     hb_util:bin(Kind);
 implementation_type_label(_Type) ->

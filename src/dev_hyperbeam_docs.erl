@@ -184,3 +184,126 @@ path_tail_key(_) ->
 
 path_tail_keys(Tail) ->
     [Key || Msg <- Tail, (Key = path_tail_key(Msg)) =/= <<>>].
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-include_lib("hb/include/hb.hrl").
+
+%% @doc Packaged BEAMs yield real types even without code-server object code.
+archive_schema_test() ->
+    Device = <<"message@1.0">>,
+    Opts = schema_test_opts(Device),
+    {ok, Module} = hb_device_load:reference(Device, Opts),
+    ?assertEqual(error, code:get_object_code(Module)),
+    Data = schema_test_json(Device, [], Opts),
+    Source = maps:get(<<"schema-source">>, Data),
+    ?assertEqual(<<"hb_device_load:schema/2">>, maps:get(<<"extractor">>, Source)),
+    ?assert(maps:get(<<"typed-key-count">>, Source) > 0),
+    ID = maps:get(<<"id">>, maps:get(<<"schema">>, Data)),
+    Params = maps:get(<<"parameters">>, ID),
+    ?assertMatch(
+        #{ <<"required">> := false, <<"type">> := <<"binary">> },
+        maps:get(<<"id-device">>, Params)
+    ),
+    ?assertMatch(
+        #{ <<"kind">> := <<"tuple">>, <<"items">> := [_, #{ <<"kind">> := <<"binary">> }] },
+        maps:get(<<"return">>, maps:get(<<"type-schema">>, ID))
+    ).
+
+%% @doc Required request fields and nested base fields survive normalization.
+schema_fields_test() ->
+    Device = <<"test-device@1.0">>,
+    Opts = schema_test_opts(Device),
+    Compute = schema_test_json(Device, [<<"schema">>, <<"compute">>], Opts),
+    ?assertMatch(
+        #{ <<"required">> := true, <<"type">> := <<"integer">> },
+        maps:get(<<"slot">>, maps:get(<<"parameters">>, Compute))
+    ),
+    Projection = schema_test_json(Device, [<<"schema">>, <<"vary-projection">>], Opts),
+    Base = maps:get(<<"base">>, maps:get(<<"type-schema">>, Projection)),
+    Fields = maps:get(<<"keys">>, Base),
+    ?assertMatch(#{ <<"presence">> := <<"optional">> }, maps:get(<<"optional">>, Fields)),
+    Deep = maps:get(<<"type">>, maps:get(<<"deep">>, Fields)),
+    ?assertMatch(
+        #{ <<"type">> := #{ <<"kind">> := <<"integer">> } },
+        maps:get(<<"slot">>, maps:get(<<"keys">>, Deep))
+    ).
+
+%% @doc A private catch-all handler's request is its third argument.
+handler_schema_test() ->
+    Device = <<"name@1.0">>,
+    Schema = schema_test_json(Device, [<<"schema">>, <<"resolve">>], schema_test_opts(Device)),
+    ?assertEqual(
+        [<<"key">>, <<"base">>, <<"request">>, <<"opts">>],
+        [maps:get(<<"name">>, Argument) || Argument <- maps:get(<<"arguments">>, Schema)]
+    ),
+    ?assertMatch(
+        #{ <<"required">> := false, <<"type-schema">> := #{ <<"kind">> := <<"union">> } },
+        maps:get(<<"load">>, maps:get(<<"parameters">>, Schema))
+    ).
+
+%% @doc Excluded helpers and metadata info/1 must not replace public info/3.
+public_schema_test() ->
+    Device = <<"router@1.0">>,
+    Schema = schema_test_json(Device, [<<"schema">>], schema_test_opts(Device)),
+    ?assertNot(maps:is_key(<<"field-distance">>, Schema)),
+    ?assertEqual(
+        3,
+        maps:get(<<"arity">>, maps:get(<<"type-schema">>, maps:get(<<"info">>, Schema)))
+    ).
+
+%% @doc An export without a spec is visible without a fabricated return type.
+untyped_schema_test() ->
+    Device = <<"test-device@1.0">>,
+    Schema = schema_test_json(
+        Device, [<<"schema">>, <<"vary-unspecified">>], schema_test_opts(Device)
+    ),
+    ?assertEqual(<<"unavailable">>, maps:get(<<"schema-status">>, Schema)),
+    ?assertEqual(<<"not declared">>, maps:get(<<"returns">>, Schema)),
+    ?assertNot(maps:is_key(<<"type-schema">>, Schema)).
+
+%% @doc The rendered docs expose types in the index, key, and parameter views.
+schema_html_test() ->
+    Device = <<"test-device@1.0">>,
+    Opts = schema_test_opts(Device),
+    Index = schema_test_request(Device, [<<"schema">>], <<"text/html">>, Opts),
+    ?assertNotEqual(nomatch, binary:match(Index, <<"<th>Returns</th>">>)),
+    Page = schema_test_request(Device, [<<"schema">>, <<"compute">>], <<"text/html">>, Opts),
+    [?assertNotEqual(nomatch, binary:match(Page, Text)) || Text <- [
+        <<"<h2>Arguments</h2>">>, <<"<h2>Returns</h2>">>,
+        <<"Full extracted schema">>, <<"integer">>, <<"required">>
+    ]],
+    Param = schema_test_request(
+        Device, [<<"schema">>, <<"compute">>, <<"slot">>], <<"text/html">>, Opts
+    ),
+    ?assertNotEqual(nomatch, binary:match(Param, <<"integer">>)).
+
+%% @doc Resolve a fixture's spec through the same preload index as the launcher.
+schema_test_opts(Device) ->
+    Store = hb_opts:get(preloaded_store, undefined, #{}),
+    {ok, SpecID} = hb_store:read(Store, [?PRELOADED_INDEX_KEY, Device], #{}),
+    #{
+        <<"name-resolvers">> => [#{ Device => SpecID }],
+        <<"cache-control">> => [<<"no-cache">>, <<"no-store">>]
+    }.
+
+%% @doc Decode the docs contract returned through an AO-Core resolution.
+schema_test_json(Device, Tail, Opts) ->
+    hb_json:decode(schema_test_request(Device, Tail, <<"application/json">>, Opts)).
+
+%% @doc Exercise the packaged renderer rather than calling its modules directly.
+schema_test_request(Device, Tail, Accept, Opts) ->
+    {ok, Response} = hb_ao:resolve(
+        #{ <<"device">> => <<"hyperbeam-docs@1.0">> },
+        #{
+            <<"path">> => <<"route">>,
+            <<"docs-kind">> => <<"device">>,
+            <<"docs-device">> => Device,
+            <<"docs-tail">> => Tail,
+            <<"request">> => #{ <<"accept">> => Accept }
+        },
+        Opts
+    ),
+    ?assertEqual(200, hb_maps:get(<<"status">>, Response, undefined, Opts)),
+    hb_maps:get(<<"body">>, Response, undefined, Opts).
+-endif.
