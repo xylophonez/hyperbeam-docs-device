@@ -238,11 +238,8 @@ docs_node_device(DeviceID, Name, Version, Summary) ->
         <<"recipes">> => device_recipes_path(DeviceID)
     }.
 
-node_device_shortcut_links() ->
-    #{}.
-
 node_info_data(Opts) ->
-    maps:merge(node_device_shortcut_links(), #{
+    #{
         <<"kind">> => <<"node-info">>,
         <<"node">> => node_href(Opts),
         <<"summary">> =>
@@ -266,7 +263,7 @@ node_info_data(Opts) ->
                 <<"Typed key/value structures that carry data, commitments, "
                     "device names, and execution history.">>
         }
-    }).
+    }.
 
 device_info_data(Device, Opts) ->
     case docs_resolve_spec(Device, Opts) of
@@ -447,11 +444,16 @@ split_device_id(DeviceID) ->
 docs_resolve_spec(Ref, _Opts) when ?IS_ID(Ref) ->
     {ok, Ref};
 docs_resolve_spec(Ref, Opts) ->
+    DocsOpts = Opts#{
+        <<"name-resolvers">> => hb_opts:get(
+            <<"docs-name-resolvers">>, hb_opts:get(name_resolvers, [], Opts), Opts
+        )
+    },
     case
         hb_ao:raw(
             #{ <<"device">> => <<"name@1.0">> },
             #{ <<"path">> => Ref, <<"load">> => false },
-            Opts
+            DocsOpts
         )
     of
         {ok, SpecID} when ?IS_ID(SpecID) -> {ok, SpecID};
@@ -1242,147 +1244,47 @@ docs_schema_for_device(Device, SpecID, Opts) ->
             }
     end.
 
+%% @doc Render the same public schema that describes device execution.
 implementation_derived_schema(Device, Opts) ->
-    case hb_types_available() of
-        true -> implementation_derived_schema_from_types(Device, Opts);
-        false -> implementation_derived_schema_from_info(Device, Opts)
-    end.
-
-hb_types_available() ->
-    case code:ensure_loaded(hb_types) of
-        {module, hb_types} -> erlang:function_exported(hb_types, extract, 2);
-        _ -> false
-    end.
-
-implementation_derived_schema_from_types(Device, Opts) ->
-    case hb_types:extract(Device, Opts#{ <<"hashpath">> => ignore }) of
-        {ok, #{ <<"keys">> := Keys } = Extracted} when is_map(Keys), map_size(Keys) > 0 ->
+    Base = #{ <<"device">> => Device },
+    try hb_ao:resolve(Base, <<"schema">>, Opts#{ <<"hashpath">> => ignore }) of
+        {ok, RawSchema} when is_map(RawSchema) ->
+            Schemas = json_safe(hb_cache:ensure_all_loaded(RawSchema, Opts)),
             Schema =
                 maps:from_list(
                     [
                         {Key, implementation_schema_key(Device, Key, KeySchema)}
-                    || {Key, KeySchema} <- maps:to_list(Keys)
+                    ||
+                        {Key, Arities} <- maps:to_list(Schemas),
+                        is_map(Arities),
+                        {ok, KeySchema} <- [callable_schema(Base, Key, Arities, Opts)]
                     ]
                 ),
-            Order = lists:sort(maps:keys(Schema)),
-            {ok,
-                Schema,
-                Order,
-                #{
-                    <<"status">> => <<"present">>,
-                    <<"extractor">> => <<"hb_types:extract/2">>,
-                    <<"module">> => maps:get(<<"module">>, Extracted, hb_util:bin(Device)),
-                    <<"key-count">> => map_size(Schema)
-                }
-            };
-        {ok, #{ <<"keys">> := Keys }} when is_map(Keys) ->
-            {error, no_public_type_keys};
-        {ok, Other} ->
-            {error, {unexpected_schema_shape, Other}};
-        {error, Reason} ->
-            {error, Reason}
-    end.
-
-implementation_derived_schema_from_info(Device, Opts) ->
-    case loaded_device_module(Device, Opts) of
-        {ok, Mod} ->
-            case fallback_schema_keys(Mod, Opts) of
-                [] ->
-                    {error, {no_public_exports, Mod}};
-                Keys ->
-                    Schema =
-                        maps:from_list(
-                            [
-                                {Key, fallback_schema_key(Device, Key)}
-                            || Key <- Keys
-                            ]
-                        ),
-                    {ok,
-                        Schema,
-                        Keys,
-                        #{
-                            <<"status">> => <<"present">>,
-                            <<"extractor">> => <<"module-info-exports">>,
-                            <<"module">> => hb_util:bin(Mod),
-                            <<"key-count">> => map_size(Schema)
-                        }
-                    }
-            end;
-        {error, Reason} ->
-            {error, Reason}
-    end.
-
-loaded_device_module(Device, Opts) ->
-    try hb_device_load:reference(Device, Opts) of
-        {ok, Mod} when is_atom(Mod) -> {ok, Mod};
-        {ok, Other} -> {error, {unexpected_device_reference, Other}};
-        {error, Reason} -> {error, Reason};
-        Other -> {error, {unexpected_device_reference, Other}}
+            {ok, Schema, lists:sort(maps:keys(Schema)), #{
+                <<"status">> => <<"present">>,
+                <<"extractor">> => <<"schema">>,
+                <<"device">> => Device,
+                <<"href">> => <<"/~", Device/binary, "/schema">>,
+                <<"key-count">> => map_size(Schema)
+            }};
+        {ok, Other} -> {error, {unexpected_schema_shape, Other}};
+        {error, Reason} -> {error, Reason}
     catch
         Class:Reason -> {error, {Class, Reason}}
     end.
 
-fallback_schema_keys(Mod, Opts) ->
-    Info = fallback_device_info(Mod, Opts),
-    Keys =
-        case info_exports(Info) of
-            [] -> module_export_keys(Mod);
-            Exports -> Exports
-        end,
-    lists:sort(lists:usort(Keys)).
-
-fallback_device_info(Mod, Opts) ->
-    try
-        case erlang:function_exported(Mod, info, 1) of
-            true ->
-                Mod:info(Opts);
-            false ->
-                case erlang:function_exported(Mod, info, 0) of
-                    true -> Mod:info();
-                    false -> #{}
-                end
-        end
-    catch
-        _:_ -> #{}
+%% @doc Show the arity actually dispatched; catch-all keys are not an inventory.
+callable_schema(Base, Key, Arities, Opts) ->
+    case hb_device:message_to_fun(Base, Key, Opts) of
+        {ok, _Module, Func} ->
+            {name, Name} = erlang:fun_info(Func, name),
+            {arity, Arity} = erlang:fun_info(Func, arity),
+            case {hb_ao:normalize_key(Name), maps:find(integer_to_binary(Arity), Arities)} of
+                {Key, {ok, Schema}} -> {ok, Schema#{ <<"arity">> => Arity }};
+                _ -> {error, not_found}
+            end;
+        _ -> {error, not_found}
     end.
-
-info_exports(Info) when is_map(Info) ->
-    case maps:get(exports, Info, maps:get(<<"exports">>, Info, [])) of
-        Exports when is_list(Exports) ->
-            [Key || Export <- Exports, (Key = export_key(Export)) =/= <<>>];
-        _ ->
-            []
-    end;
-info_exports(_Info) ->
-    [].
-
-module_export_keys(Mod) ->
-    [
-        atom_to_binary(Name)
-    || {Name, Arity} <- Mod:module_info(exports),
-        exported_device_fun(Name, Arity)
-    ].
-
-exported_device_fun(module_info, _Arity) -> false;
-exported_device_fun(info, _Arity) -> false;
-exported_device_fun(Name, Arity) ->
-    is_atom(Name) andalso Arity >= 1 andalso Arity =< 4.
-
-export_key(Key) when is_binary(Key) -> Key;
-export_key(Key) when is_atom(Key) -> atom_to_binary(Key);
-export_key(_Key) -> <<>>.
-
-fallback_schema_key(Device, Key) ->
-    (maps:without(
-        [<<"description">>],
-        schema_key(Device, Key, <<>>, #{})
-    ))#{
-        <<"source">> => <<"module-info-exports">>,
-        <<"description-source">> => <<"none">>,
-        <<"derived">> => true,
-        <<"returns">> => <<"any">>,
-        <<"type-schema">> => #{ <<"kind">> => <<"any">> }
-    }.
 
 implementation_schema_key(Device, Key, KeySchema) ->
     DeviceID =
@@ -1390,7 +1292,11 @@ implementation_schema_key(Device, Key, KeySchema) ->
             true -> Device;
             false -> hb_util:bin(Device)
         end,
-    Params = implementation_request_params(maps:get(<<"request">>, KeySchema, #{})),
+    Params =
+        case maps:get(<<"args">>, KeySchema, []) of
+            [_Base, Request | _] -> implementation_request_params(Request);
+            _ -> #{}
+        end,
     Return = implementation_type_label(maps:get(<<"return">>, KeySchema, #{})),
     maps:merge(
         maps:without(
@@ -1398,7 +1304,7 @@ implementation_schema_key(Device, Key, KeySchema) ->
             schema_key(DeviceID, Key, <<>>, Params)
         ),
         #{
-            <<"source">> => <<"hb_types:extract/2">>,
+            <<"source">> => <<"schema">>,
             <<"description-source">> => <<"none">>,
             <<"derived">> => true,
             <<"returns">> => Return,

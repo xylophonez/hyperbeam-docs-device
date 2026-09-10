@@ -1,15 +1,11 @@
 %%% @doc Renderer device for HyperBEAM `/docs' documentation payloads.
 %%%
 %%% `dev_hyperbeam_docs_data' discovers and assembles documentation data. This
-%%% device owns the renderer-facing contract. Nodes can reach it through a
-%%% request hook with no core changes, or through `message@1.0/docs' if a core
-%%% build exposes that key.
+%%% device owns the renderer-facing contract, mounted through a request hook.
 -module(dev_hyperbeam_docs).
 -implements(<<"hyperbeam-docs@1.0">>).
 -export([info/1, info/3]).
--export([request/3, route/3, index/3, node/3, device/3, schema/3, spec/3, recipes/3]).
--export([render/3, respond_html_or_json/4, unsupported_device_response/2]).
--export([renderer_metadata/0]).
+-export([request/3, route/3, index/3, node/3, device/3, spec/3, recipes/3]).
 
 -define(DEFAULT_DEVICE, <<"message@1.0">>).
 
@@ -23,7 +19,6 @@ info(_Opts) ->
             <<"index">>,
             <<"node">>,
             <<"device">>,
-            <<"schema">>,
             <<"spec">>,
             <<"recipes">>
         ]
@@ -50,7 +45,7 @@ request(_Base, HookReq, Opts) ->
         end,
     {ok, #{ <<"body">> => Body }}.
 
-%% @doc Dispatch a docs route produced by the request hook or `message@1.0/docs'.
+%% @doc Dispatch a docs route produced by the request hook.
 -spec route(#{ _ => _ }, #{ _ => _ }, #{ _ => _ }) -> {ok, _} | {error, _}.
 route(_Base, Req, Opts) ->
     RenderReq = render_request(Req, Opts),
@@ -86,12 +81,6 @@ node(Base, Req, Opts) ->
 device(_Base, Req, Opts) ->
     dev_hyperbeam_docs_data:device_info(requested_device(Req, Opts), Req, Opts).
 
-%% @doc Render schema for the device named in the `for' parameter.
--spec schema(#{ _ => _ }, #{ 'for' => binary(), _ => _ }, #{ _ => _ }) ->
-    {ok, _} | {error, _}.
-schema(_Base, Req, Opts) ->
-    dev_hyperbeam_docs_data:device_info_route(requested_device(Req, Opts), [<<"schema">>], Req, Opts).
-
 %% @doc Render spec for the device named in the `for' parameter.
 -spec spec(#{ _ => _ }, #{ 'for' => binary(), _ => _ }, #{ _ => _ }) ->
     {ok, _} | {error, _}.
@@ -103,23 +92,6 @@ spec(_Base, Req, Opts) ->
     {ok, _} | {error, _}.
 recipes(_Base, Req, Opts) ->
     dev_hyperbeam_docs_data:device_info_route(requested_device(Req, Opts), [<<"recipes">>], Req, Opts).
-
-%% @doc Render a docs payload for the caller's preferred response format.
--spec render(atom(), map(), map()) -> map().
-render(Kind, Data, Req) ->
-    dev_hyperbeam_docs_render:render(Kind, Data, Req).
-
--spec respond_html_or_json(atom(), map(), map(), map()) -> {ok, map()}.
-respond_html_or_json(Kind, HtmlData, JsonData, Req) ->
-    dev_hyperbeam_docs_render:respond_html_or_json(Kind, HtmlData, JsonData, Req).
-
--spec unsupported_device_response(binary(), map()) -> map().
-unsupported_device_response(Device, Req) ->
-    dev_hyperbeam_docs_render:unsupported_device_response(Device, Req).
-
--spec renderer_metadata() -> map().
-renderer_metadata() ->
-    dev_hyperbeam_docs_render:renderer_metadata().
 
 requested_device(Req, Opts) ->
     strip_device_prefix(
@@ -184,3 +156,81 @@ path_tail_key(_) ->
 
 path_tail_keys(Tail) ->
     [Key || Msg <- Tail, (Key = path_tail_key(Msg)) =/= <<>>].
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+%% @doc The docs device inherits its own schema and preserves non-docs requests.
+schema_and_hook_test() ->
+    Opts = #{ <<"store">> => hb_test_utils:test_store() },
+    Base = #{ <<"device">> => <<"hyperbeam-docs@1.0">> },
+    ?assertMatch(
+        {ok, #{ <<"args">> := _, <<"return">> := _ }},
+        hb_ao:resolve(Base, <<"schema/request/3">>, Opts)
+    ),
+    lists:foreach(
+        fun(Key) ->
+            Msgs = [{as, <<"json@1.0">>, #{}}, #{ <<"path">> => Key }],
+            {ok, Result} = hb_ao:resolve(
+                Base, #{ <<"path">> => <<"request">>, <<"body">> => Msgs }, Opts
+            ),
+            ?assertEqual(Msgs, hb_maps:get(<<"body">>, Result))
+        end,
+        [<<"info">>, <<"schema">>, <<"serialize">>]
+    ).
+
+%% @doc Exercise packaged docs, schema adaptation and assets over real HTTP.
+http_docs_test_() ->
+    {timeout, 60, fun() ->
+        Wallet = ar_wallet:new(),
+        Store = hb_test_utils:test_store(),
+        {ok, SpecID} = hb_cache:write(
+            #{ <<"body">> => <<"# JSON specification\n\nCanonical test spec.\n">> },
+            #{ <<"store">> => Store }
+        ),
+        Opts = #{
+            <<"priv-wallet">> => Wallet,
+            <<"port">> => 0,
+            <<"store">> => Store,
+            <<"docs-name-resolvers">> => [#{ <<"json@1.0">> => SpecID }],
+            <<"cache-control">> => [<<"no-cache">>, <<"no-store">>],
+            <<"on">> => #{ <<"request">> => #{
+                <<"device">> => <<"hyperbeam-docs@1.0">>,
+                <<"path">> => <<"request">>
+            }}
+        },
+        Node = hb_http_server:start_node(Opts),
+        try
+            {Headers, HTML} = test_get(Node, <<"docs">>, "text/html"),
+            ?assertMatch({_, _}, binary:match(HTML, <<"<!doctype html>">>)),
+            ?assert(lists:prefix("text/html", proplists:get_value("content-type", Headers))),
+            {_, JSON} = test_get(Node, <<"~json@1.0/docs">>, "application/json"),
+            Data = hb_json:decode(JSON),
+            ?assertEqual(SpecID, maps:get(<<"txid">>, maps:get(<<"spec">>, Data))),
+            ?assertMatch(
+                #{ <<"status">> := <<"present">>, <<"extractor">> := <<"schema">> },
+                maps:get(<<"schema-source">>, Data)
+            ),
+            ?assertMatch(
+                #{ <<"type-schema">> := #{ <<"args">> := [_, _, _], <<"arity">> := 3 } },
+                maps:get(<<"serialize">>, maps:get(<<"schema">>, Data))
+            ),
+            {_, Raw} = test_get(Node, <<"~json@1.0/schema/serialize/3">>, "application/json"),
+            ?assert(byte_size(Raw) > 0),
+            {_, CSS} = test_get(Node, <<"docs/assets/site.css">>, "text/css"),
+            ?assert(byte_size(CSS) > 100)
+        after
+            cowboy:stop_listener(hb_util:human_id(ar_wallet:to_address(Wallet)))
+        end
+    end}.
+
+%% @doc Fetch from a disposable HyperBEAM node without decoding its HTTP body.
+test_get(Node, Path, Accept) ->
+    {ok, {{_, 200, _}, Headers, Body}} = httpc:request(
+        get,
+        {binary_to_list(<<Node/binary, Path/binary>>), [{"accept", Accept}]},
+        [{timeout, 10000}],
+        [{body_format, binary}]
+    ),
+    {Headers, Body}.
+-endif.

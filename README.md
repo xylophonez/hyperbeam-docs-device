@@ -236,7 +236,7 @@ You can also call renderer entrypoints directly:
 ```text
 /~hyperbeam-docs@1.0/index
 /~hyperbeam-docs@1.0/device?for=message@1.0
-/~hyperbeam-docs@1.0/schema?for=message@1.0
+/~message@1.0/docs/schema
 /~hyperbeam-docs@1.0/spec?for=message@1.0
 /~hyperbeam-docs@1.0/recipes?for=message@1.0
 ```
@@ -256,9 +256,21 @@ For public canonical docs deployments, ensure `docs-name-resolvers` points at
 canonical on-weave spec IDs. That keeps the displayed docs rooted in the weave
 even when the node uses generated preloaded packages for runtime mechanics.
 
-Schema is derived from the loaded implementation when possible. If the
-implementation is not loadable, `/schema` reports an unavailable schema while
-`/docs` and `/spec` can still show the canonical spec.
+Schema comes from the target device's public `schema` key. The runtime's
+`message@1.0/schema` implementation returns the loaded device's `hb_types`
+metadata; devices may export their own schema. The docs device inherits this
+key too, so `/~hyperbeam-docs@1.0/schema` describes the docs device itself.
+
+The raw schema maps function names to arities, then to `args` and `return`.
+The cookbook displays the arity selected by normal dispatch for each directly
+callable key, and reads request parameters from the second argument. Internal
+functions and catch-all handlers are not presented as callable key inventories.
+`/~device@version/schema` retains the complete runtime schema.
+
+If the implementation or schema is unavailable, `/~device@version/docs/schema`
+reports that status while the spec and recipes remain available. The docs device
+does not extract BEAM metadata, discover archive files, or infer schemas from
+an export list.
 
 ## Publishing
 
@@ -276,11 +288,15 @@ Do not commit wallet files. `.gitignore` excludes `hyperbeam-key.json`,
 This repo pins HyperBEAM at:
 
 ```text
-a9812e021c05092fbd7332612b33b5ed9392a770
+f253d77cf510b7ef07c5ded789d3bd7f32177db2
 ```
 
 Update the `hb` dependency and Forge plugin ref together in `rebar.config` when
 moving to a new HyperBEAM commit.
+
+This is the AO-Core `vary` implementation in HyperBEAM PR #1124. Schema display
+also requires the shared `message@1.0/schema` key and handler inheritance in the
+runtime. Apply that companion change in a local HyperBEAM checkout for testing.
 
 For local HyperBEAM development, use a rebar checkout override instead of
 committing machine-local `file://` paths:
@@ -291,3 +307,15 @@ ln -s /path/to/HyperBEAM _checkouts/hb
 ```
 
 Then run the normal `rebar3 compile` and `rebar3 device ...` commands.
+
+Alternatively, with sibling `HyperBEAM` and `hyperbeam_docs` checkouts, run the
+packaged integration tests from HyperBEAM:
+
+```sh
+HB_PORT=0 rebar3 device test \
+  --device-src src/preloaded,../hyperbeam_docs/src \
+  --module dev_hyperbeam_docs
+```
+
+These tests exercise schema inheritance, the request hook, HTML/JSON rendering,
+and packaged assets on a disposable local HyperBEAM node.

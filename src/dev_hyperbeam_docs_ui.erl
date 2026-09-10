@@ -1422,7 +1422,7 @@ device_docs_route_path(DeviceID) ->
 device_schema_path(DeviceID) ->
     <<"/~", DeviceID/binary, "/docs/schema">>.
 device_direct_schema_path(DeviceID) ->
-    device_schema_path(DeviceID).
+    <<"/~", DeviceID/binary, "/schema">>.
 device_schema_key_path(DeviceID, Key) ->
     <<"/~", DeviceID/binary, "/docs/schema/", Key/binary>>.
 device_spec_path(DeviceID) ->
@@ -2117,7 +2117,7 @@ schema_source_label(Source) ->
         <<"implementation-derived">> ->
             iolist_to_binary([
                 <<"implementation-derived via ">>,
-                maps:get(<<"extractor">>, Source, <<"hb_types:extract/2">>),
+                maps:get(<<"extractor">>, Source, <<"schema">>),
                 <<" (">>,
                 hb_util:bin(maps:get(<<"key-count">>, Source, 0)),
                 <<" keys)">>
