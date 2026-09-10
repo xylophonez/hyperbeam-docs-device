@@ -381,6 +381,7 @@ render_device_html(Data) ->
             schema_source_note(Data),
             <<"<h2 id=\"schema\">Schema</h2>">>,
             schema_table(DeviceID, Schema, SchemaOrder),
+            schema_handlers(Data),
             render_spec_section(DeviceID, Spec),
             <<"<h2 id=\"recipes\">Recipes</h2><div class=\"hb-docs-card-grid\">">>,
             recipe_nav(DeviceID, Recipes),
@@ -403,7 +404,8 @@ render_schema_index_html(Data) ->
             <<"<p class=\"eyebrow\">Schema</p><h1>~">>, esc(DeviceID),
             <<" schema</h1>">>,
             schema_source_note(Data),
-            schema_table(DeviceID, Schema, SchemaOrder)
+            schema_table(DeviceID, Schema, SchemaOrder),
+            schema_handlers(Data)
         ],
     docs_page_html(
         <<"HyperBEAM Schema">>,
@@ -430,8 +432,14 @@ render_schema_key_html(Payload) ->
             <<"<p class=\"eyebrow\">Schema Key</p><h1>~">>, esc(DeviceID),
             <<" / ">>, esc(Key), <<"</h1><p>">>,
             esc(maps:get(<<"description">>, KeySchema, <<>>)),
-            <<"</p><h2>Parameters</h2>">>,
-            params_table(DeviceID, Key, Params)
+            <<"</p>">>,
+            schema_arguments(KeySchema),
+            <<"<h2>Request parameters</h2>">>,
+            case maps:get(<<"schema-status">>, KeySchema, <<>>) of
+                <<"unavailable">> -> <<"<p>Request parameters are not declared.</p>">>;
+                _ -> params_table(DeviceID, Key, Params)
+            end,
+            schema_result(KeySchema)
         ],
     docs_page_html(
         <<"HyperBEAM Schema Key">>,
@@ -439,6 +447,182 @@ render_schema_key_html(Payload) ->
         device_sidebar(Data, device_schema_key_path(DeviceID, Key)),
         Content
     ).
+
+%% @doc Show the function's argument roles and declared types.
+schema_arguments(KeySchema) ->
+    case maps:get(<<"arguments">>, KeySchema, []) of
+        [] ->
+            [<<"<p>">>, esc(maps:get(<<"schema-reason">>, KeySchema,
+                <<"No extractable type specification is available for this key.">>)), <<"</p>">>];
+        Arguments ->
+            [
+                <<"<h2>Arguments</h2><table><thead><tr><th>Argument</th>"
+                    "<th>Type</th></tr></thead><tbody>">>,
+                [
+                    [<<"<tr><td>">>, esc(maps:get(<<"name">>, Argument)),
+                        <<"</td><td><code>">>, esc(maps:get(<<"type">>, Argument)),
+                        <<"</code></td></tr>">>]
+                || Argument <- Arguments
+                ],
+                <<"</tbody></table>">>
+            ]
+    end.
+
+%% @doc Keep return types and nested schemas inspectable in the HTML docs.
+schema_result(KeySchema) ->
+    [
+        <<"<h2>Returns</h2>">>,
+        schema_returns(KeySchema, detailed),
+        case maps:find(<<"type-schema">>, KeySchema) of
+            {ok, Schema} ->
+                [
+                    <<"<details><summary>Full extracted schema</summary>">>,
+                    render_code_block(<<"json">>, [json:format(Schema, #{indent => 2})]),
+                    <<"</details>">>
+                ];
+            error -> []
+        end
+    ].
+
+%% @doc Render each possible result without exposing the compact schema grammar.
+schema_returns(#{ <<"type-schema">> := #{ <<"return">> := Return } }, Mode) ->
+    Cases = case Return of
+        #{ <<"kind">> := <<"union">>, <<"members">> := Members } -> Members;
+        _ -> [Return]
+    end,
+    [
+        case {Mode, length(Cases)} of
+            {detailed, Count} when Count > 1 ->
+                <<"<p class=\"hb-schema-result-note\">Returns one of the following:</p>">>;
+            _ -> []
+        end,
+        <<"<div class=\"hb-schema-results ">>, atom_to_binary(Mode), <<"\">">>,
+        [schema_return_case(Case, Mode) || Case <- Cases],
+        <<"</div>">>
+    ];
+schema_returns(_KeySchema, _Mode) ->
+    <<"<span class=\"hb-schema-result-note\">Not declared</span>">>.
+
+%% @doc Recognize tagged result tuples while preserving their extracted tag.
+schema_return_case(#{ <<"kind">> := <<"tuple">>, <<"items">> := [
+        #{ <<"kind">> := <<"literal">>, <<"value">> := Tag }, Payload
+    ] }, Mode) ->
+    {Tone, Title} = case Tag of
+        <<"ok">> -> {<<"success">>, <<"Success">>};
+        <<"error">> -> {<<"error">>, <<"Error">>};
+        _ -> {<<"neutral">>, <<"Tagged result">>}
+    end,
+    [
+        <<"<div class=\"hb-schema-result ">>, Tone, <<"\">">>,
+        <<"<div class=\"hb-schema-result-heading\"><strong>">>, Title, <<"</strong>">>,
+        case {Mode, Tone} of
+            {compact, Known} when Known =/= <<"neutral">> -> [];
+            _ -> [<<"<code class=\"hb-schema-result-tag\">">>,
+                esc(json:encode(Tag)), <<"</code>">>]
+        end,
+        <<"</div>">>, schema_return_payload(Payload, Mode), <<"</div>">>
+    ];
+schema_return_case(Type, Mode) ->
+    [<<"<div class=\"hb-schema-result neutral\">">>,
+        schema_return_payload(Type, Mode), <<"</div>">>].
+
+schema_return_payload(Type, detailed) -> schema_type_tree(Type);
+schema_return_payload(Type, compact) ->
+    [<<"<span class=\"hb-schema-result-type\">">>, esc(schema_type_text(Type)), <<"</span>">>].
+
+%% @doc Expand message fields and nested containers into readable type trees.
+schema_type_tree(#{ <<"kind">> := <<"message">>, <<"keys">> := Fields } = Type) ->
+    [
+        <<"<span class=\"hb-schema-type-label\">Message</span><dl class=\"hb-schema-fields\">">>,
+        [
+            [<<"<div><dt><code>">>, esc(Name), <<"</code><span>">>,
+                esc(maps:get(<<"presence">>, Field, <<"optional">>)),
+                <<"</span></dt><dd>">>, schema_type_tree(maps:get(<<"type">>, Field)),
+                <<"</dd></div>">>]
+        || {Name, Field} <- lists:sort(maps:to_list(Fields))
+        ],
+        case maps:get(<<"wildcard">>, Type, <<"none">>) of
+            #{ <<"type">> := Other } ->
+                [<<"<div><dt>Other fields</dt><dd>">>, schema_type_tree(Other), <<"</dd></div>">>];
+            _ -> []
+        end,
+        <<"</dl>">>
+    ];
+schema_type_tree(#{ <<"kind">> := <<"union">>, <<"members">> := Members }) ->
+    [<<"<span class=\"hb-schema-type-label\">One of</span><ul class=\"hb-schema-type-list\">">>,
+        [[<<"<li>">>, schema_type_tree(Member), <<"</li>">>] || Member <- Members], <<"</ul>">>];
+schema_type_tree(#{ <<"kind">> := <<"tuple">>, <<"items">> := Items }) ->
+    [<<"<span class=\"hb-schema-type-label\">Tuple, in this order</span><ol class=\"hb-schema-type-list\">">>,
+        [[<<"<li>">>, schema_type_tree(Item), <<"</li>">>] || Item <- Items], <<"</ol>">>];
+schema_type_tree(#{ <<"kind">> := <<"list">>, <<"item">> := Item }) ->
+    [<<"<span class=\"hb-schema-type-label\">List of</span><div class=\"hb-schema-type-item\">">>,
+        schema_type_tree(Item), <<"</div>">>];
+schema_type_tree(Type) ->
+    [<<"<span class=\"hb-schema-type-label\">">>, esc(schema_type_text(Type)), <<"</span>">>].
+
+%% @doc Short labels for result summaries; the full schema retains exact types.
+schema_type_text(#{ <<"kind">> := <<"message">> }) -> <<"Message">>;
+schema_type_text(#{ <<"kind">> := <<"wildcard">> }) -> <<"Unspecified (_)">>;
+schema_type_text(#{ <<"kind">> := <<"any">> }) -> <<"Any value">>;
+schema_type_text(#{ <<"kind">> := <<"literal">>, <<"value">> := Value }) -> json:encode(Value);
+schema_type_text(#{ <<"kind">> := <<"union">>, <<"members">> := Members }) ->
+    lists:join(<<" or ">>, [schema_type_text(Member) || Member <- Members]);
+schema_type_text(#{ <<"kind">> := <<"tuple">>, <<"items">> := Items }) ->
+    [<<"{">>, lists:join(<<", ">>, [schema_type_text(Item) || Item <- Items]), <<"}">>];
+schema_type_text(#{ <<"kind">> := <<"list">>, <<"item">> := Item }) ->
+    [<<"List of ">>, schema_type_text(Item)];
+schema_type_text(#{ <<"kind">> := <<"range">>, <<"min">> := Min, <<"max">> := Max }) ->
+    [hb_util:bin(Min), <<" to ">>, hb_util:bin(Max)];
+schema_type_text(#{ <<"kind">> := <<"remote">>, <<"module">> := Module, <<"name">> := Name }) ->
+    [Module, <<":">>, Name];
+schema_type_text(#{ <<"name">> := Name }) -> Name;
+schema_type_text(#{ <<"kind">> := Kind }) ->
+    binary:replace(Kind, <<"_">>, <<" ">>, [global]);
+schema_type_text(_) -> <<"Unspecified">>.
+
+%% @doc Document catch-all functions without presenting their names as API keys.
+schema_handlers(Data) ->
+    case maps:get(<<"schema-handlers">>, Data, #{}) of
+        Handlers when map_size(Handlers) =:= 0 -> [];
+        Handlers ->
+            [
+                <<"<h2 id=\"handlers\">Handlers</h2><p>These functions handle keys "
+                    "selected by device dispatch. Their function names are not "
+                    "a list of callable API keys.</p>">>,
+                [
+                    [
+                        <<"<details><summary>">>, esc(Kind), <<" handler: ">>,
+                        esc(maps:get(<<"function">>, Handler)), <<"/">>,
+                        hb_util:bin(maps:get(<<"arity">>, Handler)), <<"</summary>">>,
+                        schema_arguments(Handler),
+                        <<"<h3>Request parameters</h3>">>,
+                        handler_parameters(Handler),
+                        schema_result(Handler),
+                        <<"</details>">>
+                    ]
+                || {Kind, Handler} <- lists:sort(maps:to_list(Handlers))
+                ]
+            ]
+    end.
+
+%% @doc Handler parameters have no invented callable-key URLs.
+handler_parameters(#{ <<"schema-status">> := <<"unavailable">> }) ->
+    <<"<p>Request parameters are not declared.</p>">>;
+handler_parameters(Handler) ->
+    [
+        <<"<dl>">>,
+        [
+            [<<"<dt><code>">>, esc(Name), <<"</code></dt><dd><code>">>,
+                esc(maps:get(<<"type">>, Param)), <<"</code> — ">>,
+                case maps:get(<<"required">>, Param) of
+                    true -> <<"required">>;
+                    false -> <<"optional">>
+                end,
+                <<"</dd>">>]
+        || {Name, Param} <- lists:sort(maps:to_list(maps:get(<<"parameters">>, Handler)))
+        ],
+        <<"</dl>">>
+    ].
 
 render_schema_parameter_html(Payload) ->
     Data = maps:get(<<"device-data">>, Payload),
@@ -1315,6 +1499,52 @@ body.hb-docs-protocol .sidebar-viewing-back.is-active {
   text-decoration: none !important;
 }
 .hb-docs-guide-group a:hover { text-decoration: underline !important; }
+.hb-schema-results { display: grid; gap: 12px; margin: 12px 0 24px; }
+.hb-schema-result {
+  --result-accent: var(--border-strong);
+  min-width: 0;
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--result-accent);
+  border-radius: 8px;
+  background: var(--bg);
+  overflow-wrap: anywhere;
+}
+.hb-schema-result.success { --result-accent: var(--positive); }
+.hb-schema-result.error { --result-accent: var(--negative); }
+.hb-schema-result-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.hb-schema-result-heading strong { font-size: 0.95rem; }
+.hb-schema-result-tag { font-size: 0.8rem !important; }
+.hb-schema-result-note { color: var(--text-secondary); font-size: 0.9rem; }
+.hb-schema-type-label { font-size: 0.9rem; }
+.markdown-section .hb-schema-fields { margin: 10px 0 0; }
+.hb-schema-fields > div {
+  display: grid;
+  grid-template-columns: minmax(110px, 1fr) minmax(0, 2fr);
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+.hb-schema-fields dt { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+.hb-schema-fields dt > span { color: var(--text-tertiary); font-size: 0.75rem; font-weight: 400; }
+.markdown-section .hb-schema-fields dd { margin: 0; }
+.markdown-section .hb-schema-type-list { margin: 6px 0 0; padding-left: 20px; }
+.hb-schema-type-item { margin: 6px 0 0 12px; }
+.hb-schema-results.compact { gap: 8px; margin: 0; }
+.compact .hb-schema-result { padding: 0; border: 0; background: none; }
+.compact .hb-schema-result-heading { margin-bottom: 2px; }
+.compact .hb-schema-result-heading strong { font-size: 0.8rem; }
+.hb-schema-result-type { color: var(--text-secondary); font-size: 0.85rem; }
+@media (max-width: 600px) {
+  .hb-schema-result { padding: 14px; }
+  .hb-schema-fields > div { grid-template-columns: 1fr; gap: 5px; }
+}
 		.hb-docs-renderer-note {
 		  color: var(--text-secondary);
 		  font-size: var(--text-small);
@@ -1919,6 +2149,8 @@ concept_rows(Concepts) ->
     || {Key, Value} <- lists:sort(maps:to_list(Concepts))
     ].
 
+schema_table(_DeviceID, _Schema, []) ->
+    <<"<p>No directly callable keys are documented.</p>">>;
 schema_table(DeviceID, Schema, Order) ->
     IncludeDescriptions = schema_has_descriptions(Schema, Order),
     [
@@ -1927,7 +2159,7 @@ schema_table(DeviceID, Schema, Order) ->
             true -> <<"<th>Description</th>">>;
             false -> []
         end,
-        <<"<th>Parameters</th></tr></thead><tbody>">>,
+        <<"<th>Parameters</th><th>Returns</th><th>Schema</th></tr></thead><tbody>">>,
         schema_rows(DeviceID, Schema, Order, IncludeDescriptions),
         <<"</tbody></table>">>
     ].
@@ -1954,7 +2186,12 @@ schema_rows(DeviceID, Schema, Order, IncludeDescriptions) ->
                     <<"\">">>, esc(Name), <<"</a></td>">>,
                     schema_description_cell(KeySchema, IncludeDescriptions),
                     <<"<td>">>,
-                    param_pills(DeviceID, Name, maps:get(<<"parameters">>, KeySchema, #{})),
+                    case maps:get(<<"schema-status">>, KeySchema, <<>>) of
+                        <<"unavailable">> -> <<"not declared">>;
+                        _ -> param_pills(DeviceID, Name, maps:get(<<"parameters">>, KeySchema, #{}))
+                    end,
+                    <<"</td><td>">>, schema_returns(KeySchema, compact),
+                    <<"</td><td>">>, esc(maps:get(<<"schema-status">>, KeySchema, <<>>)),
                     <<"</td></tr>">>
                 ]
         end
@@ -2124,8 +2361,15 @@ schema_source_label(Source) ->
                 <<"implementation-derived via ">>,
                 maps:get(<<"extractor">>, Source, <<"schema">>),
                 <<" (">>,
+                hb_util:bin(maps:get(<<"typed-key-count">>, Source, 0)),
+                <<" typed / ">>,
                 hb_util:bin(maps:get(<<"key-count">>, Source, 0)),
-                <<" keys)">>
+                <<" keys; ">>,
+                hb_util:bin(maps:get(<<"typed-handler-count">>, Source, 0)),
+                <<" typed / ">>,
+                hb_util:bin(maps:get(<<"handler-count">>, Source, 0)),
+                <<" handlers)">>,
+                schema_source_status_suffix(Source)
             ]);
         <<"implementation-derived-unavailable">> ->
             iolist_to_binary([

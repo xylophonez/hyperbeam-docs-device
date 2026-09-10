@@ -311,6 +311,22 @@ untyped_schema_test() ->
     ?assertEqual(<<"not declared">>, maps:get(<<"returns">>, Schema)),
     ?assertNot(maps:is_key(<<"type-schema">>, Schema)).
 
+%% @doc The rendered docs expose types in the index, key, and parameter views.
+schema_html_test() ->
+    Device = <<"test-device@1.0">>,
+    Opts = schema_test_opts(Device),
+    Index = schema_test_request(Device, [<<"schema">>], <<"text/html">>, Opts),
+    ?assertNotEqual(nomatch, binary:match(Index, <<"<th>Returns</th>">>)),
+    Page = schema_test_request(Device, [<<"schema">>, <<"compute">>], <<"text/html">>, Opts),
+    [?assertNotEqual(nomatch, binary:match(Page, Text)) || Text <- [
+        <<"<h2>Arguments</h2>">>, <<"<h2>Returns</h2>">>,
+        <<"Full extracted schema">>, <<"integer">>, <<"required">>
+    ]],
+    Param = schema_test_request(
+        Device, [<<"schema">>, <<"compute">>, <<"slot">>], <<"text/html">>, Opts
+    ),
+    ?assertNotEqual(nomatch, binary:match(Param, <<"integer">>)).
+
 %% @doc Resolve a fixture's spec through the same preload index as the launcher.
 schema_test_opts(Device) ->
     Store = hb_opts:get(preloaded_store, undefined, #{}),

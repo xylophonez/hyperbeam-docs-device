@@ -262,18 +262,18 @@ metadata; devices may export their own schema. The docs device inherits this
 key too, so `/~hyperbeam-docs@1.0/schema` describes the docs device itself.
 
 The raw schema maps function names to arities, then to `args` and `return`.
-The cookbook selects the arity used by normal dispatch for each directly
-callable key. The docs JSON preserves argument roles, request parameter types
-and required flags, return types, and the full nested schema. Dashed keys such
-as `set-path` match their Erlang function names.
+The cookbook displays the arity selected by normal dispatch for each directly
+callable key. Schema pages show argument roles, request parameter types and
+required flags, return types, and an expandable full nested schema. Dashed keys
+such as `set-path` match their Erlang function names.
 
 Public keys without extractable specs remain visible with `schema-status:
 unavailable`; their parameter and return types are not inferred. The full docs
 JSON reports `typed-key-count` and `key-count` in `schema-source`, with separate
 handler counts and an overall `present`, `partial`, or `unavailable` status.
 
-Named catch-all handlers appear separately in the full docs JSON under
-`schema-handlers`. Their argument roles include the leading key,
+Named catch-all handlers appear in a separate Handlers section and in the full
+docs JSON under `schema-handlers`. Their argument roles include the leading key,
 so request parameters come from the third argument. Handler names are not
 advertised as directly callable API keys. Internal helpers stay out of the key
 inventory. `type-schema` preserves the public API's `args` and `return` fields.
