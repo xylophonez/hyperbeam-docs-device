@@ -288,15 +288,14 @@ Do not commit wallet files. `.gitignore` excludes `hyperbeam-key.json`,
 This repo pins HyperBEAM at:
 
 ```text
-f253d77cf510b7ef07c5ded789d3bd7f32177db2
+1aebe74afd88f5fa35b188a16bd10aac04c4541e
 ```
 
 Update the `hb` dependency and Forge plugin ref together in `rebar.config` when
 moving to a new HyperBEAM commit.
 
-This is the AO-Core `vary` implementation in HyperBEAM PR #1124. Schema display
-also requires the shared `message@1.0/schema` key and handler inheritance in the
-runtime. Apply that companion change in a local HyperBEAM checkout for testing.
+This revision includes the AO-Core `vary` implementation and the shared
+`message@1.0/schema` key with handler inheritance and device exclusions.
 
 For local HyperBEAM development, use a rebar checkout override instead of
 committing machine-local `file://` paths:
