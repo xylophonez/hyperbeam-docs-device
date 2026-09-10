@@ -358,7 +358,7 @@ on_weave_info_data(Device, SpecID, Opts) ->
     Spec = on_weave_spec_status(Device, SpecID, Opts),
     SpecSigner = maps:get(<<"signer">>, Spec, <<>>),
     SpecSource = maps:get(<<"source">>, Spec, <<"on-weave">>),
-    {Schema, SchemaOrder, SchemaSource} =
+    {Schema, SchemaOrder, Handlers, SchemaSource} =
         docs_schema_for_device(Device, SpecID, Opts),
     Recipes = device_recipe_docs_for_source(
         SpecSource,
@@ -385,6 +385,7 @@ on_weave_info_data(Device, SpecID, Opts) ->
         <<"keys">> => on_weave_key_summaries(Device, Schema, SchemaOrder),
         <<"schema">> => Schema,
         <<"schema-order">> => SchemaOrder,
+        <<"schema-handlers">> => Handlers,
         <<"schema-source">> => SchemaSource,
         <<"spec">> => Spec,
         <<"recipes">> => Recipes,
@@ -1219,10 +1220,11 @@ device_key_summary(Device, Name, Kind, Description) ->
 
 docs_schema_for_device(Device, SpecID, Opts) ->
     case implementation_derived_schema(Device, Opts) of
-        {ok, Schema, SchemaOrder, Source} ->
+        {ok, Schema, SchemaOrder, Handlers, Source} ->
             {
                 Schema,
                 SchemaOrder,
+                Handlers,
                 Source#{
                     <<"mode">> => <<"implementation-derived">>,
                     <<"spec-id">> => SpecID
@@ -1232,6 +1234,7 @@ docs_schema_for_device(Device, SpecID, Opts) ->
             {
                 #{},
                 [],
+                #{},
                 #{
                     <<"mode">> => <<"implementation-derived-unavailable">>,
                     <<"device">> => Device,
@@ -1250,22 +1253,32 @@ implementation_derived_schema(Device, Opts) ->
     try hb_ao:resolve(Base, <<"schema">>, Opts#{ <<"hashpath">> => ignore }) of
         {ok, RawSchema} when is_map(RawSchema) ->
             Schemas = json_safe(hb_cache:ensure_all_loaded(RawSchema, Opts)),
+            Module = hb_device:message_to_device(Base, Opts),
+            Info = hb_device:info(Module, Base, Opts),
+            Candidates = lists:usort(maps:keys(Schemas) ++ schema_public_keys(Module, Info, Opts)),
             Schema =
                 maps:from_list(
                     [
                         {Key, implementation_schema_key(Device, Key, KeySchema)}
                     ||
-                        {Key, Arities} <- maps:to_list(Schemas),
-                        is_map(Arities),
-                        {ok, KeySchema} <- [callable_schema(Base, Key, Arities, Opts)]
+                        Key <- Candidates,
+                        {ok, KeySchema} <- [callable_schema(Base, Module, Key, Schemas, Opts)]
                     ]
                 ),
-            {ok, Schema, lists:sort(maps:keys(Schema)), #{
-                <<"status">> => <<"present">>,
+            Handlers = schema_handlers(Module, Info, Schemas, Opts),
+            Typed = typed_schema_count(Schema),
+            TypedHandlers = typed_schema_count(Handlers),
+            {ok, Schema, lists:sort(maps:keys(Schema)), Handlers, #{
+                <<"status">> => schema_status(
+                    Typed + TypedHandlers, map_size(Schema) + map_size(Handlers)
+                ),
                 <<"extractor">> => <<"schema">>,
                 <<"device">> => Device,
                 <<"href">> => <<"/~", Device/binary, "/schema">>,
-                <<"key-count">> => map_size(Schema)
+                <<"key-count">> => map_size(Schema),
+                <<"typed-key-count">> => Typed,
+                <<"handler-count">> => map_size(Handlers),
+                <<"typed-handler-count">> => TypedHandlers
             }};
         {ok, Other} -> {error, {unexpected_schema_shape, Other}};
         {error, Reason} -> {error, Reason}
@@ -1273,18 +1286,83 @@ implementation_derived_schema(Device, Opts) ->
         Class:Reason -> {error, {Class, Reason}}
     end.
 
-%% @doc Show the arity actually dispatched; catch-all keys are not an inventory.
-callable_schema(Base, Key, Arities, Opts) ->
+%% @doc Enumerate declared public keys so missing specs remain visible.
+schema_public_keys(Module, Info, Opts) ->
+    Names =
+        case hb_maps:get(exports, Info, undefined, Opts) of
+            Exports when is_list(Exports) -> Exports;
+            _ -> [Name || {Name, Arity} <- Module:module_info(exports),
+                Name =/= module_info, Arity >= 1, Arity =< 3,
+                Name =/= info orelse Arity =:= 3]
+        end,
+    [schema_name(Name) || Name <- Names].
+
+%% @doc Show direct calls on this implementation at their dispatched arity.
+callable_schema(Base, Module, Key, Schemas, Opts) ->
     case hb_device:message_to_fun(Base, Key, Opts) of
         {ok, _Module, Func} ->
+            {module, Owner} = erlang:fun_info(Func, module),
             {name, Name} = erlang:fun_info(Func, name),
-            {arity, Arity} = erlang:fun_info(Func, arity),
-            case {hb_ao:normalize_key(Name), maps:find(integer_to_binary(Arity), Arities)} of
-                {Key, {ok, Schema}} -> {ok, Schema#{ <<"arity">> => Arity }};
+            case {Owner, schema_name(Name)} of
+                {Module, Key} -> {ok, schema_function(Func, ok, Schemas)};
                 _ -> {error, not_found}
             end;
         _ -> {error, not_found}
     end.
+
+%% @doc Describe named catch-all functions separately from callable keys.
+schema_handlers(Module, Info, Schemas, Opts) ->
+    maps:from_list([
+        {atom_to_binary(Kind), implementation_schema_details(
+            case erlang:fun_info(Func, module) of
+                {module, Module} -> schema_function(Func, add_key, Schemas);
+                _ -> schema_function(Func, add_key, #{})
+            end
+        )}
+    || Kind <- [handler, default],
+        Func <- [schema_handler_fun(hb_maps:get(Kind, Info, undefined, Opts), Opts)],
+        is_function(Func)
+    ]).
+
+schema_handler_fun(Handler, Opts) when is_map(Handler) ->
+    hb_maps:get(func, Handler, undefined, Opts);
+schema_handler_fun(Handler, _Opts) -> Handler.
+
+%% @doc Keep the public schema intact while naming AO-Core argument roles.
+schema_function(Func, Mode, Schemas) ->
+    {name, Name} = erlang:fun_info(Func, name),
+    {arity, Arity} = erlang:fun_info(Func, arity),
+    Meta = #{ <<"function">> => schema_name(Name), <<"arity">> => Arity },
+    case maps:find(integer_to_binary(Arity), maps:get(schema_name(Name), Schemas, #{})) of
+        {ok, #{ <<"args">> := Args, <<"return">> := _ } = Head} when is_list(Args) ->
+            Roles = case Mode of
+                ok -> [<<"base">>, <<"request">>, <<"opts">>];
+                add_key -> [<<"key">>, <<"base">>, <<"request">>, <<"opts">>]
+            end,
+            Meta#{
+                <<"schema-status">> => <<"present">>,
+                <<"type-schema">> => Head#{ <<"arity">> => Arity },
+                <<"arguments">> => [
+                    #{ <<"name">> => Role, <<"type-schema">> => Type }
+                || {Role, Type} <- lists:zip(lists:sublist(Roles, length(Args)), Args)
+                ]
+            };
+        _ -> Meta#{
+            <<"schema-status">> => <<"unavailable">>,
+            <<"schema-reason">> => <<"No extractable spec for the selected function.">>,
+            <<"arguments">> => []
+        }
+    end.
+
+schema_name(Name) when is_atom(Name) -> hb_util:atom_to_dashed_binary(Name);
+schema_name(Name) -> hb_ao:normalize_key(Name).
+
+typed_schema_count(Schemas) ->
+    length([ok || #{ <<"schema-status">> := <<"present">> } <- maps:values(Schemas)]).
+
+schema_status(0, _Total) -> <<"unavailable">>;
+schema_status(Total, Total) -> <<"present">>;
+schema_status(_Typed, _Total) -> <<"partial">>.
 
 implementation_schema_key(Device, Key, KeySchema) ->
     DeviceID =
@@ -1292,25 +1370,40 @@ implementation_schema_key(Device, Key, KeySchema) ->
             true -> Device;
             false -> hb_util:bin(Device)
         end,
-    Params =
-        case maps:get(<<"args">>, KeySchema, []) of
-            [_Base, Request | _] -> implementation_request_params(Request);
-            _ -> #{}
-        end,
-    Return = implementation_type_label(maps:get(<<"return">>, KeySchema, #{})),
+    Details = implementation_schema_details(KeySchema),
     maps:merge(
         maps:without(
             [<<"description">>],
-            schema_key(DeviceID, Key, <<>>, Params)
+            schema_key(DeviceID, Key, <<>>, maps:get(<<"parameters">>, Details))
         ),
-        #{
-            <<"source">> => <<"schema">>,
-            <<"description-source">> => <<"none">>,
-            <<"derived">> => true,
-            <<"returns">> => Return,
-            <<"type-schema">> => json_safe(KeySchema)
-        }
+        Details
     ).
+
+%% @doc Share argument and result presentation between direct keys and handlers.
+implementation_schema_details(KeySchema) ->
+    Arguments = maps:get(<<"arguments">>, KeySchema),
+    Params = maps:from_list(lists:flatmap(
+        fun(#{ <<"name">> := <<"request">>, <<"type-schema">> := Request }) ->
+                maps:to_list(implementation_request_params(Request));
+           (_) -> []
+        end,
+        Arguments
+    )),
+    Return = case maps:find(<<"type-schema">>, KeySchema) of
+        {ok, Head} -> implementation_type_label(maps:get(<<"return">>, Head));
+        error -> <<"not declared">>
+    end,
+    KeySchema#{
+        <<"source">> => <<"schema">>,
+        <<"description-source">> => <<"none">>,
+        <<"derived">> => maps:get(<<"schema-status">>, KeySchema) =:= <<"present">>,
+        <<"parameters">> => Params,
+        <<"returns">> => Return,
+        <<"arguments">> => [
+            Argument#{ <<"type">> => implementation_type_label(maps:get(<<"type-schema">>, Argument)) }
+        || Argument <- Arguments
+        ]
+    }.
 
 implementation_request_params(#{ <<"kind">> := <<"message">>, <<"keys">> := Keys })
         when is_map(Keys) ->
@@ -1337,7 +1430,8 @@ implementation_param(Name, Presence, Type) ->
             <<>>
         )
     ))#{
-        <<"description-source">> => <<"none">>
+        <<"description-source">> => <<"none">>,
+        <<"type-schema">> => Type
     }.
 
 implementation_required(required) -> true;
@@ -1357,6 +1451,9 @@ implementation_type_label(#{ <<"kind">> := <<"union">>, <<"members">> := Members
     implementation_join_type(<<"union(">>, Members, <<")">>);
 implementation_type_label(#{ <<"kind">> := <<"literal">>, <<"value">> := Value }) ->
     iolist_to_binary([<<"literal:">>, hb_util:bin(io_lib:format("~tp", [Value]))]);
+implementation_type_label(#{ <<"kind">> := <<"range">>, <<"min">> := Min, <<"max">> := Max }) ->
+    iolist_to_binary([hb_util:bin(Min), <<"..">>, hb_util:bin(Max)]);
+implementation_type_label(#{ <<"kind">> := <<"wildcard">> }) -> <<"_">>;
 implementation_type_label(#{ <<"kind">> := Kind }) ->
     hb_util:bin(Kind);
 implementation_type_label(_Type) ->

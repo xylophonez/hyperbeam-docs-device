@@ -262,15 +262,28 @@ metadata; devices may export their own schema. The docs device inherits this
 key too, so `/~hyperbeam-docs@1.0/schema` describes the docs device itself.
 
 The raw schema maps function names to arities, then to `args` and `return`.
-The cookbook displays the arity selected by normal dispatch for each directly
-callable key, and reads request parameters from the second argument. Internal
-functions and catch-all handlers are not presented as callable key inventories.
-`/~device@version/schema` retains the complete runtime schema.
+The cookbook selects the arity used by normal dispatch for each directly
+callable key. The docs JSON preserves argument roles, request parameter types
+and required flags, return types, and the full nested schema. Dashed keys such
+as `set-path` match their Erlang function names.
+
+Public keys without extractable specs remain visible with `schema-status:
+unavailable`; their parameter and return types are not inferred. The full docs
+JSON reports `typed-key-count` and `key-count` in `schema-source`, with separate
+handler counts and an overall `present`, `partial`, or `unavailable` status.
+
+Named catch-all handlers appear separately in the full docs JSON under
+`schema-handlers`. Their argument roles include the leading key,
+so request parameters come from the third argument. Handler names are not
+advertised as directly callable API keys. Internal helpers stay out of the key
+inventory. `type-schema` preserves the public API's `args` and `return` fields.
 
 If the implementation or schema is unavailable, `/~device@version/docs/schema`
 reports that status while the spec and recipes remain available. The docs device
-does not extract BEAM metadata, discover archive files, or infer schemas from
-an export list.
+does not extract BEAM metadata or discover archive files. It uses exports only
+to enumerate callable keys, with all type information supplied by the public
+`schema` API. The pinned runtime skips overloaded specs and needs BEAM debug
+information.
 
 ## Publishing
 
