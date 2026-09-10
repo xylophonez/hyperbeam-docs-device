@@ -460,11 +460,16 @@ render_schema_parameter_html(Payload) ->
             end,
             <<"</td></tr><tr><th>Type</th><td>">>,
             esc(maps:get(<<"type">>, ParamSchema, <<>>)),
-            <<"</td></tr><tr><th>Description</th><td>">>,
-            esc(maps:get(<<"description">>, ParamSchema, <<>>)),
-            <<"</td></tr><tr><th>Example</th><td><code>">>,
-            esc(maps:get(<<"example">>, ParamSchema, <<>>)),
-            <<"</code></td></tr></tbody></table>">>
+            <<"</td></tr>">>,
+            [
+                [
+                    <<"<tr><th>">>, Label, <<"</th><td>">>,
+                    param_metadata_value(Field, ParamSchema),
+                    <<"</td></tr>">>
+                ]
+            || {Field, Label} <- param_metadata_fields([ParamSchema])
+            ],
+            <<"</tbody></table>">>
         ],
     docs_page_html(
         <<"HyperBEAM Schema Parameter">>,
@@ -2311,9 +2316,11 @@ spec_markdown(Spec) ->
 params_table(_DeviceID, _Key, Params) when map_size(Params) =:= 0 ->
     <<"<p>No parameters.</p>">>;
 params_table(DeviceID, Key, Params) ->
+    Fields = param_metadata_fields(maps:values(Params)),
     [
-        <<"<table><thead><tr><th>Name</th><th>Required</th><th>Type</th>"
-            "<th>Description</th><th>Example</th></tr></thead><tbody>">>,
+        <<"<table><thead><tr><th>Name</th><th>Required</th><th>Type</th>">>,
+        [[<<"<th>">>, Label, <<"</th>">>] || {_, Label} <- Fields],
+        <<"</tr></thead><tbody>">>,
         [
             [
                 <<"<tr><td><a href=\"">>,
@@ -2322,14 +2329,39 @@ params_table(DeviceID, Key, Params) ->
                 <<"</code></a></td><td>">>,
                 param_required_cell(DeviceID, Key, Name, Param),
                 <<"</td><td>">>, esc(maps:get(<<"type">>, Param, <<>>)),
-                <<"</td><td>">>, esc(maps:get(<<"description">>, Param, <<>>)),
-                <<"</td><td><code>">>, esc(maps:get(<<"example">>, Param, <<>>)),
-                <<"</code></td></tr>">>
+                <<"</td>">>,
+                [
+                    [<<"<td>">>, param_metadata_value(Field, Param), <<"</td>">>]
+                || {Field, _} <- Fields
+                ],
+                <<"</tr>">>
             ]
         || {Name, Param} <- lists:sort(maps:to_list(Params))
         ],
         <<"</tbody></table>">>
     ].
+
+%% @doc Include optional metadata only when at least one parameter supplies it.
+param_metadata_fields(Params) ->
+    [
+        {Field, Label}
+    || {Field, Label} <- [
+        {<<"description">>, <<"Description">>},
+        {<<"example">>, <<"Example">>}
+    ],
+        lists:any(
+            fun(Param) ->
+                trim(hb_util:bin(maps:get(Field, Param, <<>>))) =/= <<>>
+            end,
+            Params
+        )
+    ].
+
+%% @doc Escape parameter metadata and retain code formatting for examples.
+param_metadata_value(<<"example">>, Param) ->
+    [<<"<code>">>, esc(maps:get(<<"example">>, Param, <<>>)), <<"</code>">>];
+param_metadata_value(Field, Param) ->
+    esc(maps:get(Field, Param, <<>>)).
 
 recipe_markdown(Recipe) ->
     case maps:get(<<"markdown">>, Recipe, undefined) of
