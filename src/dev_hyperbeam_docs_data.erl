@@ -1160,33 +1160,6 @@ doc_item_tag(Node, Name, Default) ->
 format_reason(Reason) ->
     hb_util:bin(io_lib:format("~tp", [Reason])).
 
-json_safe(Value) when is_map(Value) ->
-    maps:from_list(
-        [
-            {json_safe_key(Key), json_safe(Inner)}
-        || {Key, Inner} <- maps:to_list(Value)
-        ]
-    );
-json_safe(Value) when is_list(Value) ->
-    [json_safe(Inner) || Inner <- Value];
-json_safe(true) ->
-    true;
-json_safe(false) ->
-    false;
-json_safe(Value) when is_atom(Value) ->
-    atom_to_binary(Value, utf8);
-json_safe(Value) when is_tuple(Value) ->
-    [json_safe(Inner) || Inner <- tuple_to_list(Value)];
-json_safe(Value) ->
-    Value.
-
-json_safe_key(Key) when is_binary(Key) ->
-    Key;
-json_safe_key(Key) when is_atom(Key) ->
-    binary:replace(atom_to_binary(Key, utf8), <<"_">>, <<"-">>, [global]);
-json_safe_key(Key) ->
-    hb_util:bin(io_lib:format("~tp", [Key])).
-
 node_href(Opts) ->
     Host = hb_opts:get(node_host, <<"localhost">>, Opts),
     Port = hb_opts:get(port, 8734, Opts),
@@ -1252,7 +1225,8 @@ implementation_derived_schema(Device, Opts) ->
     Base = #{ <<"device">> => Device },
     try hb_ao:resolve(Base, <<"schema">>, Opts#{ <<"hashpath">> => ignore }) of
         {ok, RawSchema} when is_map(RawSchema) ->
-            Schemas = json_safe(hb_cache:ensure_all_loaded(RawSchema, Opts)),
+            Document = hb_cache:ensure_all_loaded(RawSchema, Opts),
+            Schemas = hb_json:decode(hb_maps:get(<<"body">>, Document, Opts)),
             Module = hb_device:message_to_device(Base, Opts),
             Info = hb_device:info(Module, Base, Opts),
             Candidates = lists:usort(maps:keys(Schemas) ++ schema_public_keys(Module, Info, Opts)),
@@ -1333,15 +1307,21 @@ schema_function(Func, Mode, Schemas) ->
     {name, Name} = erlang:fun_info(Func, name),
     {arity, Arity} = erlang:fun_info(Func, arity),
     Meta = #{ <<"function">> => schema_name(Name), <<"arity">> => Arity },
-    case maps:find(integer_to_binary(Arity), maps:get(schema_name(Name), Schemas, #{})) of
-        {ok, #{ <<"args">> := Args, <<"return">> := _ } = Head} when is_list(Args) ->
+    case maps:get(schema_name(Name), Schemas, []) of
+        [#{ <<"args">> := Args, <<"return">> := _ } = Head | _] = Heads
+                when is_list(Args) ->
             Roles = case Mode of
                 ok -> [<<"base">>, <<"request">>, <<"opts">>];
                 add_key -> [<<"key">>, <<"base">>, <<"request">>, <<"opts">>]
             end,
+            FullSchema = case Heads of
+                [_] -> Head;
+                _ -> Head#{ <<"alternatives">> => Heads }
+            end,
             Meta#{
                 <<"schema-status">> => <<"present">>,
-                <<"type-schema">> => Head#{ <<"arity">> => Arity },
+                <<"type-schema">> => FullSchema#{ <<"arity">> => length(Args) },
+                <<"schema-alternatives">> => Heads,
                 <<"arguments">> => [
                     #{ <<"name">> => Role, <<"type-schema">> => Type }
                 || {Role, Type} <- lists:zip(lists:sublist(Roles, length(Args)), Args)

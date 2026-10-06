@@ -165,9 +165,10 @@ path_tail_keys(Tail) ->
 schema_and_hook_test() ->
     Opts = #{ <<"store">> => hb_test_utils:test_store() },
     Base = #{ <<"device">> => <<"hyperbeam-docs@1.0">> },
+    {ok, Document} = hb_ao:resolve(Base, <<"schema">>, Opts),
     ?assertMatch(
-        {ok, #{ <<"args">> := _, <<"return">> := _ }},
-        hb_ao:resolve(Base, <<"schema/request/3">>, Opts)
+        #{ <<"request">> := [#{ <<"args">> := [_, _, _], <<"return">> := _ }] },
+        hb_json:decode(hb_maps:get(<<"body">>, Document, Opts))
     ),
     lists:foreach(
         fun(Key) ->
@@ -216,8 +217,11 @@ http_docs_test_() ->
                 #{ <<"type-schema">> := #{ <<"args">> := [_, _, _], <<"arity">> := 3 } },
                 maps:get(<<"serialize">>, maps:get(<<"schema">>, Data))
             ),
-            {_, Raw} = test_get(Node, <<"~json@1.0/schema/serialize/3">>, "application/json"),
-            ?assert(byte_size(Raw) > 0),
+            {_, Raw} = test_get(Node, <<"~json@1.0/schema">>, "application/json"),
+            ?assertMatch(
+                #{ <<"serialize">> := [#{ <<"args">> := [_, _, _] }] },
+                hb_json:decode(Raw)
+            ),
             {_, CSS} = test_get(Node, <<"docs/assets/site.css">>, "text/css"),
             ?assert(byte_size(CSS) > 100)
         after
@@ -300,6 +304,22 @@ public_schema_test() ->
         3,
         maps:get(<<"arity">>, maps:get(<<"type-schema">>, maps:get(<<"info">>, Schema)))
     ).
+
+%% @doc Ordered alternatives remain inspectable without changing the renderer.
+ordered_schema_test() ->
+    Device = <<"test-device@1.0">>,
+    Opts = schema_test_opts(Device),
+    Schema = schema_test_json(
+        Device, [<<"schema">>, <<"vary-alternatives">>], Opts
+    ),
+    Heads = maps:get(<<"schema-alternatives">>, Schema),
+    ?assertEqual([<<"integer">>, <<"binary">>], [
+        maps:get(<<"kind">>, maps:get(<<"type">>,
+            maps:get(<<"value">>, maps:get(<<"keys">>, Base))))
+    || #{ <<"args">> := [Base | _] } <- Heads
+    ]),
+    ?assertEqual(Heads,
+        maps:get(<<"alternatives">>, maps:get(<<"type-schema">>, Schema))).
 
 %% @doc An export without a spec is visible without a fabricated return type.
 untyped_schema_test() ->
