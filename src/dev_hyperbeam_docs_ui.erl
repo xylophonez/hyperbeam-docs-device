@@ -347,20 +347,23 @@ command_preview(Text) ->
 
 render_node_html(Data) ->
     Devices = maps:get(<<"devices">>, Data),
-    Renderer = maps:get(<<"renderer">>, Data, docs_renderer()),
     Boilerplate = maps:get(<<"boilerplate">>, Data, boilerplate_index()),
     Content =
         [
             <<"<p class=\"eyebrow\">Node</p><h1>HyperBEAM Docs</h1><p>">>,
             esc(maps:get(<<"summary">>, Data)),
-            <<"</p><p class=\"hb-docs-renderer-note\">Rendered by <a href=\"">>,
-            esc(maps:get(<<"node-renderer">>, Renderer)),
-            <<"\">~">>, esc(maps:get(<<"device">>, Renderer)), <<"</a>.</p>">>,
-            <<"<h2>Guides</h2>">>,
-            boilerplate_structured_index(Boilerplate),
-            <<"<h2 id=\"devices\">Devices</h2><div class=\"hb-docs-card-grid\">">>,
+            <<"</p><div class=\"hb-docs-catalog-heading\"><h2 id=\"devices\">Devices</h2>"
+                "<span id=\"device-count\" aria-live=\"polite\">">>,
+            integer_to_binary(length(Devices)), <<" devices</span></div>"
+                "<label class=\"hb-docs-device-filter\">Find a device"
+                "<input type=\"search\" id=\"device-filter\" placeholder=\"Filter by name...\" "
+                "aria-controls=\"device-catalog\" autocomplete=\"off\"></label>"
+                "<div id=\"device-catalog\" class=\"hb-docs-card-grid\">">>,
             [device_row(Device) || Device <- Devices],
-            <<"</div><h2>Concepts</h2>">>,
+            <<"</div><p id=\"device-empty\" hidden>No devices match your search.</p>"
+                "<h2>Guides</h2>">>,
+            boilerplate_structured_index(Boilerplate),
+            <<"<h2>Concepts</h2>">>,
             concept_rows(maps:get(<<"concepts">>, Data))
         ],
     docs_page_html(<<"HyperBEAM Node Info">>, <<"/docs">>, node_sidebar(Devices, <<"/docs">>), Content).
@@ -378,7 +381,6 @@ render_device_html(Data) ->
             esc(maps:get(<<"id">>, Device)),
             <<"</h1>">>,
             device_summary_paragraph(Data),
-            schema_source_note(Data),
             <<"<h2 id=\"schema\">Schema</h2>">>,
             schema_table(DeviceID, Schema, SchemaOrder),
             schema_handlers(Data),
@@ -403,7 +405,6 @@ render_schema_index_html(Data) ->
         [
             <<"<p class=\"eyebrow\">Schema</p><h1>~">>, esc(DeviceID),
             <<" schema</h1>">>,
-            schema_source_note(Data),
             schema_table(DeviceID, Schema, SchemaOrder),
             schema_handlers(Data)
         ],
@@ -500,10 +501,19 @@ schema_returns(#{ <<"type-schema">> := #{ <<"return">> := Return } }, Mode) ->
         [schema_return_case(Case, Mode) || Case <- Cases],
         <<"</div>">>
     ];
-schema_returns(_KeySchema, _Mode) ->
+schema_returns(_KeySchema, compact) ->
+    <<"<span class=\"hb-schema-empty\" title=\"Return type not specified\">&mdash;</span>">>;
+schema_returns(_KeySchema, detailed) ->
     <<"<span class=\"hb-schema-result-note\">Not declared</span>">>.
 
 %% @doc Recognize tagged result tuples while preserving their extracted tag.
+schema_return_case(#{ <<"kind">> := <<"tuple">>, <<"items">> := [
+        #{ <<"kind">> := <<"literal">>, <<"value">> := Tag }, Payload
+    ] }, compact) ->
+    [<<"<div class=\"hb-schema-return-line\"><code>">>, esc(Tag),
+        <<"</code><span>">>, esc(schema_type_text(Payload)), <<"</span></div>">>];
+schema_return_case(#{ <<"kind">> := <<"unknown">> }, compact) ->
+    <<"<span class=\"hb-schema-empty\" title=\"Return type not specified\">&mdash;</span>">>;
 schema_return_case(#{ <<"kind">> := <<"tuple">>, <<"items">> := [
         #{ <<"kind">> := <<"literal">>, <<"value">> := Tag }, Payload
     ] }, Mode) ->
@@ -943,6 +953,7 @@ body.hb-docs-protocol {
   --text-caption: clamp(0.6875rem, 0.8vw, 0.75rem);
 }
 body.hb-docs-protocol .site-header { display: none; }
+body.hb-docs-protocol main { width: 100%; }
 body.hb-docs-protocol .sidebar { top: 0 !important; }
 body.hb-docs-protocol .sidebar > h1 { display: none; }
 body.hb-docs-protocol .content {
@@ -1545,6 +1556,98 @@ body.hb-docs-protocol .sidebar-viewing-back.is-active {
   .hb-schema-result { padding: 14px; }
   .hb-schema-fields > div { grid-template-columns: 1fr; gap: 5px; }
 }
+
+/* Scan the key, its inputs and its output on one line. */
+body.hb-docs-protocol .markdown-section .hb-schema-table {
+  display: table;
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  margin: 20px 0 32px;
+}
+body.hb-docs-protocol .markdown-section .hb-schema-table thead th {
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 12px 18px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+}
+body.hb-docs-protocol .markdown-section .hb-schema-table thead th:first-child { width: 31%; }
+body.hb-docs-protocol .markdown-section .hb-schema-table tbody th,
+body.hb-docs-protocol .markdown-section .hb-schema-table tbody td {
+  padding: 17px 18px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  text-align: left;
+  background: var(--bg);
+  font-size: 0.85rem;
+  line-height: 1.5;
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+body.hb-docs-protocol .markdown-section .hb-schema-table tbody tr:last-child > * { border-bottom: 0; }
+body.hb-docs-protocol .markdown-section .hb-schema-table tbody tr:hover > * { background: var(--bg-elevated); }
+body.hb-docs-protocol .markdown-section .hb-schema-table code {
+  padding: 0 !important;
+  background: none !important;
+  color: inherit !important;
+  font-size: 0.81rem !important;
+  font-weight: inherit !important;
+}
+body.hb-docs-protocol .markdown-section .hb-schema-key,
+body.hb-docs-protocol .markdown-section .hb-schema-param {
+  text-decoration: none !important;
+  color: var(--text) !important;
+}
+body.hb-docs-protocol .markdown-section .hb-schema-key { font-weight: 600 !important; }
+body.hb-docs-protocol .markdown-section .hb-schema-key:hover code { text-decoration: underline; text-underline-offset: 4px; }
+.hb-schema-description { display: block; margin-top: 5px; color: var(--text-secondary); font-size: 0.8rem; }
+.hb-schema-empty { color: var(--text-tertiary); }
+.hb-schema-param { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; margin: 0 0 4px; }
+.hb-schema-param span { color: var(--text-tertiary); font-size: 0.72rem; }
+.hb-schema-param:hover code { text-decoration: underline; }
+.hb-schema-return-line { display: flex; gap: 8px; align-items: baseline; }
+.hb-schema-return-line code { min-width: 38px; color: var(--text-tertiary) !important; }
+.hb-schema-return-line span { color: var(--text-secondary); }
+.hb-docs-catalog-heading { display: flex; align-items: baseline; gap: 14px; }
+.hb-docs-catalog-heading span { color: var(--text-tertiary); font-size: 0.85rem; }
+.hb-docs-device-filter { display: block; color: var(--text-secondary); font-size: 0.8rem; }
+.hb-docs-device-filter input {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  padding: 12px 14px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font: inherit;
+  font-size: 0.9rem;
+}
+.hb-docs-device-filter input:focus-visible,
+.hb-schema-table a:focus-visible { outline: 2px solid var(--link-blue); outline-offset: 3px; }
+#device-catalog [hidden] { display: none !important; }
+#device-catalog .hb-docs-device-card-body { min-height: 0; }
+#device-catalog .hb-docs-device-card { min-height: 0; }
+@media (max-width: 600px) {
+  body.hb-docs-protocol .markdown-section .hb-schema-table,
+  body.hb-docs-protocol .markdown-section .hb-schema-table tbody,
+  body.hb-docs-protocol .markdown-section .hb-schema-table tr { display: block; }
+  body.hb-docs-protocol .markdown-section .hb-schema-table thead { display: none; }
+  body.hb-docs-protocol .markdown-section .hb-schema-table tbody tr { padding: 16px; border-bottom: 1px solid var(--border); }
+  body.hb-docs-protocol .markdown-section .hb-schema-table tbody tr:last-child { border-bottom: 0; }
+  body.hb-docs-protocol .markdown-section .hb-schema-table tbody th { display: block; padding: 0 0 10px; border: 0 !important; }
+  body.hb-docs-protocol .markdown-section .hb-schema-table tbody td { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 0 8px; padding: 4px 0; border: 0 !important; }
+  .hb-schema-table td::before { content: attr(data-label); color: var(--text-tertiary); font-size: 0.75rem; }
+  .hb-schema-param { grid-column: 2; }
+}
+
 		.hb-docs-renderer-note {
 		  color: var(--text-secondary);
 		  font-size: var(--text-small);
@@ -1639,7 +1742,11 @@ body.hb-docs-protocol .sidebar-viewing-back.is-active {
     font-weight: 500;
   }
   body.hb-docs-protocol .sidebar { top: var(--header-height) !important; }
-  body.hb-docs-protocol .content { padding-top: var(--header-height) !important; }
+  body.hb-docs-protocol .content {
+    padding-top: var(--header-height) !important;
+    width: auto !important;
+    max-width: 100%;
+  }
 }
 ">>.
 docs_sidebar(Items) ->
@@ -1974,8 +2081,10 @@ device_card_title(Device) ->
     device_display_title(maps:get(<<"name">>, Device, device_card_label(Device))).
 
 device_card_summary_text(Device) ->
-    maps:get(<<"summary">>, Device,
-        maps:get(<<"schema">>, Device, maps:get(<<"href">>, Device, <<>>))).
+    case maps:get(<<"summary">>, Device, <<>>) of
+        <<"On-weave device docs discovered from spec ID ", _/binary>> -> <<>>;
+        Summary -> Summary
+    end.
 
 device_display_names() ->
     #{
@@ -2152,66 +2261,52 @@ concept_rows(Concepts) ->
 schema_table(_DeviceID, _Schema, []) ->
     <<"<p>No directly callable keys are documented.</p>">>;
 schema_table(DeviceID, Schema, Order) ->
-    IncludeDescriptions = schema_has_descriptions(Schema, Order),
     [
-        <<"<table><thead><tr><th>Key</th>">>,
-        case IncludeDescriptions of
-            true -> <<"<th>Description</th>">>;
-            false -> []
-        end,
-        <<"<th>Parameters</th><th>Returns</th><th>Schema</th></tr></thead><tbody>">>,
-        schema_rows(DeviceID, Schema, Order, IncludeDescriptions),
+        <<"<table class=\"hb-schema-table\"><thead><tr><th scope=\"col\">Key</th>"
+            "<th scope=\"col\">Parameters</th><th>Returns</th></tr></thead><tbody>">>,
+        schema_rows(DeviceID, Schema, Order),
         <<"</tbody></table>">>
     ].
 
-schema_has_descriptions(Schema, Order) ->
-    lists:any(
-        fun(Name) ->
-            case maps:get(Name, Schema, undefined) of
-                undefined -> false;
-                KeySchema -> trim(maps:get(<<"description">>, KeySchema, <<>>)) =/= <<>>
-            end
-        end,
-        Order
-    ).
-
-schema_rows(DeviceID, Schema, Order, IncludeDescriptions) ->
+schema_rows(DeviceID, Schema, Order) ->
     [
         case maps:get(Name, Schema, undefined) of
             undefined -> [];
             KeySchema ->
                 [
-                    <<"<tr><td><a href=\"">>,
+                    <<"<tr><th scope=\"row\"><a class=\"hb-schema-key\" href=\"">>,
                     esc(device_schema_key_path(DeviceID, Name)),
-                    <<"\">">>, esc(Name), <<"</a></td>">>,
-                    schema_description_cell(KeySchema, IncludeDescriptions),
-                    <<"<td>">>,
+                    <<"\"><code>">>, esc(Name), <<"</code></a>">>,
+                    schema_description_cell(KeySchema),
+                    <<"</th><td data-label=\"Parameters\">">>,
                     case maps:get(<<"schema-status">>, KeySchema, <<>>) of
-                        <<"unavailable">> -> <<"not declared">>;
+                        <<"unavailable">> ->
+                            <<"<span class=\"hb-schema-empty\" title=\"Parameters not specified\">&mdash;</span>">>;
                         _ -> param_pills(DeviceID, Name, maps:get(<<"parameters">>, KeySchema, #{}))
                     end,
-                    <<"</td><td>">>, schema_returns(KeySchema, compact),
-                    <<"</td><td>">>, esc(maps:get(<<"schema-status">>, KeySchema, <<>>)),
+                    <<"</td><td data-label=\"Returns\">">>, schema_returns(KeySchema, compact),
                     <<"</td></tr>">>
                 ]
         end
     || Name <- Order
     ].
 
-schema_description_cell(KeySchema, true) ->
-    [<<"<td>">>, esc(maps:get(<<"description">>, KeySchema, <<>>)), <<"</td>">>];
-schema_description_cell(_KeySchema, false) ->
-    [].
+schema_description_cell(KeySchema) ->
+    case trim(maps:get(<<"description">>, KeySchema, <<>>)) of
+        <<>> -> [];
+        Description -> [<<"<span class=\"hb-schema-description\">">>,
+            esc(Description), <<"</span>">>]
+    end.
 
 param_pills(_DeviceID, _Key, Params) when map_size(Params) =:= 0 ->
-    <<"<span class=\"param-pills-none\">none</span>">>;
-param_pills(_DeviceID, _Key, Params) ->
+    <<"<span class=\"hb-schema-empty\" title=\"No declared parameters\">&mdash;</span>">>;
+param_pills(DeviceID, Key, Params) ->
     [
         [
-            <<"<span class=\"">>, pill_class_for_label(param_required_label(Param)), <<"\">">>,
-            esc(Name),
-            <<" ">>, param_required_label(Param),
-            <<"</span>">>
+            <<"<a class=\"hb-schema-param\" href=\"">>,
+            esc(device_schema_param_path(DeviceID, Key, Name)),
+            <<"\"><code>">>, esc(Name), <<"</code><span>">>,
+            param_required_label(Param), <<"</span></a>">>
         ]
     || {Name, Param} <- lists:sort(maps:to_list(Params))
     ].
@@ -2341,51 +2436,6 @@ recipe_nav(DeviceID, Recipes) ->
     || {Name, Recipe} <- lists:sort(maps:to_list(Recipes))
     ].
 
-schema_source_note(Data) ->
-    case maps:get(<<"schema-source">>, Data, undefined) of
-        Source when is_map(Source) ->
-            [
-                <<"<p class=\"hb-docs-renderer-note\"><strong>Schema source:</strong> ">>,
-                esc(schema_source_label(Source)),
-                <<"</p>">>
-            ];
-        _ ->
-            []
-    end.
-
-schema_source_label(Source) ->
-    Mode = maps:get(<<"mode">>, Source, <<"unknown">>),
-    case Mode of
-        <<"implementation-derived">> ->
-            iolist_to_binary([
-                <<"implementation-derived via ">>,
-                maps:get(<<"extractor">>, Source, <<"schema">>),
-                <<" (">>,
-                hb_util:bin(maps:get(<<"typed-key-count">>, Source, 0)),
-                <<" typed / ">>,
-                hb_util:bin(maps:get(<<"key-count">>, Source, 0)),
-                <<" keys; ">>,
-                hb_util:bin(maps:get(<<"typed-handler-count">>, Source, 0)),
-                <<" typed / ">>,
-                hb_util:bin(maps:get(<<"handler-count">>, Source, 0)),
-                <<" handlers)">>,
-                schema_source_status_suffix(Source)
-            ]);
-        <<"implementation-derived-unavailable">> ->
-            iolist_to_binary([
-                <<"implementation-derived unavailable">>,
-                schema_source_status_suffix(Source)
-            ]);
-        _ ->
-            Mode
-    end.
-
-schema_source_status_suffix(Source) ->
-    case maps:get(<<"status">>, Source, <<>>) of
-        <<>> -> <<>>;
-        Status -> iolist_to_binary([<<" (">>, Status, <<")">>])
-    end.
-
 render_spec_section(_DeviceID, Spec) ->
     [
         <<"<h2 id=\"spec\">Spec</h2>">>,
@@ -2511,6 +2561,8 @@ arweave_tx_link(TXID, Label) ->
 arweave_tx_href(TXID) ->
     <<"https://viewblock.io/arweave/tx/", TXID/binary>>.
 
+on_chain_txid(#{ <<"source">> := <<"preloaded-store">> }) ->
+    <<>>;
 on_chain_txid(Item) when is_map(Item) ->
     case on_chain_txid_value(maps:get(<<"txid">>, Item, <<>>)) of
         <<>> ->
@@ -2618,6 +2670,7 @@ recipe_markdown(Recipe) ->
 docs_shell_assets() ->
     [
         <<"<script src=\"/docs/assets/prism-core.min.js\"></script>">>,
+        <<"<script src=\"/docs/assets/prism-markup.min.js\"></script>">>,
         <<"<script src=\"/docs/assets/prism-bash.min.js\"></script>">>,
         <<"<script src=\"/docs/assets/prism-json.min.js\"></script>">>,
         <<"<script src=\"/docs/assets/prism-http.min.js\"></script>">>,
@@ -2644,6 +2697,24 @@ docs_shell_assets() ->
 docs_page_enhancer_js() ->
     <<"
 (function(){
+  function initDeviceFilter() {
+    var input = document.getElementById('device-filter');
+    var catalog = document.getElementById('device-catalog');
+    if (!input || !catalog) return;
+    var cards = Array.from(catalog.querySelectorAll('.hb-docs-device-card'));
+    input.addEventListener('input', function () {
+      var query = input.value.trim().toLowerCase();
+      var count = 0;
+      cards.forEach(function (card) {
+        var visible = card.textContent.toLowerCase().includes(query);
+        card.hidden = !visible;
+        if (visible) count++;
+      });
+      document.getElementById('device-count').textContent = count + ' devices';
+      document.getElementById('device-empty').hidden = count !== 0;
+    });
+  }
+  document.addEventListener('DOMContentLoaded', initDeviceFilter);
   function addLineNumbers(pre, code) {
     if (pre.dataset.lineNumbers) return;
     var lines = (code.textContent || '').split('\\n');
